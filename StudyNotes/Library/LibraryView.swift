@@ -16,6 +16,7 @@ struct LibraryView: View {
     @State private var renameTarget: LibraryItem?
     @State private var renameText = ""
     @State private var deleteTarget: LibraryItem?
+    @State private var showsKeySettings = false
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 20, alignment: .top)]
 
@@ -54,6 +55,9 @@ struct LibraryView: View {
             .navigationTitle("Memor")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button { showsKeySettings = true } label: {
+                        Label("Ask Claude Settings", systemImage: "sparkles")
+                    }
                     Button { showsImporter = true } label: {
                         Label("Import PDF", systemImage: "square.and.arrow.down")
                     }
@@ -61,6 +65,9 @@ struct LibraryView: View {
                         Label("New notebook", systemImage: "plus")
                     }
                 }
+            }
+            .sheet(isPresented: $showsKeySettings) {
+                APIKeySettingsView()
             }
         }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in

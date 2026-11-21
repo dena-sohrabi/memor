@@ -54,7 +54,30 @@ final class PDFEditor {
     var currentPageIndex = 0
     var pageCount = 0
     var showsPageSidebar = false
+    /// Circle-to-ask: the Ask tool is on, and the conversation in the side panel.
+    var isAskMode = false
+    var askSession: AskSession?
     @ObservationIgnored weak var controller: PDFReaderController?
+
+    func setAskMode(_ on: Bool) {
+        isAskMode = on
+        controller?.setAskMode(on)
+    }
+
+    /// Opens the side panel and asks Claude about the circled area.
+    func didCircle(_ image: UIImage) {
+        isAskMode = false
+        askSession?.cancel()
+        let session = AskSession(image: image)
+        askSession = session
+        session.start()
+    }
+
+    func closeAsk() {
+        askSession?.cancel()
+        askSession = nil
+        setAskMode(false)
+    }
 
     func undo() { controller?.undo() }
     func redo() { controller?.redo() }
@@ -76,9 +99,24 @@ struct PDFReaderScreen: View {
     @State private var password = ""
     @State private var asksForPage = false
     @State private var pageText = ""
+    @State private var showsKeySettings = false
 
     var body: some View {
         content
+            .overlay(alignment: .trailing) {
+                if let session = editor.askSession {
+                    AskPanel(session: session) {
+                        withAnimation(.snappy) { editor.closeAsk() }
+                    }
+                    .padding(.vertical, 12)
+                    .padding(.trailing, 12)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy, value: editor.askSession?.id)
+            .sheet(isPresented: $showsKeySettings) {
+                APIKeySettingsView { editor.setAskMode(true) }
+            }
             .navigationTitle($item.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbarRole(.editor)
@@ -170,6 +208,16 @@ struct PDFReaderScreen: View {
                     .tint(color.swatchColor)
                 }
             }
+            Toggle(isOn: Binding(get: { editor.isAskMode }, set: { on in
+                if on, !APIKeyStore.hasKey {
+                    showsKeySettings = true
+                } else {
+                    editor.setAskMode(on)
+                }
+            })) {
+                Label("Ask Claude", systemImage: "sparkles")
+            }
+            .toggleStyle(.button)
             Button { editor.undo() } label: {
                 Label("Undo", systemImage: "arrow.uturn.backward")
             }
@@ -217,6 +265,7 @@ private struct PDFReaderRepresentable: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> PDFReaderController {
         let controller = PDFReaderController(document: document, item: item, editor: editor, modelContext: modelContext)
+        controller.onAskSelection = { [weak editor] image in editor?.didCircle(image) }
         editor.controller = controller
         return controller
     }

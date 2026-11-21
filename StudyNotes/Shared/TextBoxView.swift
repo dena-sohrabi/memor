@@ -18,13 +18,15 @@ final class BoxTextView: UITextView {
 
 /// A typed text box on a notebook canvas or a PDF page.
 ///
-/// While editing, it shows a border, a move handle on the left and a resize
-/// strip on the right edge. Its height follows the text. It writes position
-/// and text straight into its `TextBox` model; the delegate saves.
+/// When you're not typing in it, drag it with a finger to move it, or tap
+/// it to edit. While editing, it shows a border, a move handle on the left
+/// and a resize strip on the right edge. Its height follows the text. It
+/// writes position and text straight into its `TextBox` model; the delegate
+/// saves.
 final class TextBoxView: UIView {
     static let defaultFont = UIFont.systemFont(ofSize: 18)
     private static let minimumWidth: CGFloat = 80
-    private static let handleSize: CGFloat = 30
+    private static let handleSize: CGFloat = 40
 
     let boxID: UUID
     let model: TextBox
@@ -34,6 +36,8 @@ final class TextBoxView: UIView {
     private let moveHandle = UIImageView(image: UIImage(systemName: "arrow.up.and.down.and.arrow.left.and.right"))
     private let resizeHandle = UIView()
     private let resizeGrip = UIView()
+    /// Moves the whole box with a finger while it isn't being edited.
+    private let dragPan = UIPanGestureRecognizer()
     private var frameAtGestureStart: CGRect = .zero
     private var renderScale: CGFloat = 0
 
@@ -81,6 +85,13 @@ final class TextBoxView: UIView {
         resizeHandle.addSubview(resizeGrip)
         resizeHandle.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handleResize(_:))))
         addSubview(resizeHandle)
+
+        // Fingers only: the Pencil keeps writing into the box (Scribble).
+        dragPan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        dragPan.maximumNumberOfTouches = 1
+        dragPan.delegate = self
+        dragPan.addTarget(self, action: #selector(handleMove(_:)))
+        addGestureRecognizer(dragPan)
 
         setEditingChrome(false)
         fitHeight()
@@ -149,6 +160,17 @@ final class TextBoxView: UIView {
         layer.borderWidth = editing ? 1 : 0
         moveHandle.isHidden = !editing
         resizeHandle.isHidden = !editing
+        // While editing, a drag selects text; the handle moves the box instead.
+        dragPan.isEnabled = !editing
+    }
+
+    /// A light lift while the box is being dragged.
+    private func setLifted(_ lifted: Bool) {
+        layer.shadowColor = UIColor.black.cgColor
+        layer.shadowOffset = CGSize(width: 0, height: 3)
+        layer.shadowRadius = 8
+        layer.shadowOpacity = lifted ? 0.18 : 0
+        backgroundColor = lifted ? UIColor.white.withAlphaComponent(0.6) : .clear
     }
 
     @objc private func handleMove(_ gesture: UIPanGestureRecognizer) {
@@ -156,13 +178,16 @@ final class TextBoxView: UIView {
         switch gesture.state {
         case .began:
             frameAtGestureStart = frame
+            setLifted(true)
         case .changed:
             let translation = gesture.translation(in: container)
             frame.origin = CGPoint(x: frameAtGestureStart.minX + translation.x, y: frameAtGestureStart.minY + translation.y)
         case .ended:
+            setLifted(false)
             writeFrameToModel()
             delegate?.textBoxView(self, didMoveFrom: frameAtGestureStart)
         case .cancelled, .failed:
+            setLifted(false)
             frame = frameAtGestureStart
         default:
             break
@@ -187,6 +212,13 @@ final class TextBoxView: UIView {
         default:
             break
         }
+    }
+}
+
+extension TextBoxView: UIGestureRecognizerDelegate {
+    /// A drag that starts on a box moves the box, not the page under it.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        gestureRecognizer === dragPan && otherGestureRecognizer.view is UIScrollView && otherGestureRecognizer is UIPanGestureRecognizer
     }
 }
 

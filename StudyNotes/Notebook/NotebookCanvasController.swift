@@ -58,6 +58,9 @@ final class NotebookCanvasController: UIViewController {
     let page: NotebookPage
     let modelContext: ModelContext
     var onTextModeEnded: (() -> Void)?
+    /// Gets a picture of the area circled with the Ask tool.
+    var onAskSelection: ((UIImage) -> Void)?
+    private let askLasso = AskLassoView()
 
     private let canvasView = NotebookCanvasView()
     private let dotGrid = DotGridView()
@@ -72,6 +75,7 @@ final class NotebookCanvasController: UIViewController {
     private let saveDebouncer = Debouncer()
     private let viewportDebouncer = Debouncer()
     private var didRestoreViewport = false
+    private var lastLayoutSize: CGSize = .zero
     private var isTextMode: Bool
     /// Set once another page is replacing this one.
     private var isLeaving = false
@@ -153,6 +157,11 @@ final class NotebookCanvasController: UIViewController {
         imageOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(imageOverlay)
 
+        askLasso.frame = view.bounds
+        askLasso.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        askLasso.onSelection = { [weak self] rect in self?.finishAsk(in: rect) }
+        view.addSubview(askLasso)
+
         images.showAll()
         for box in page.textBoxes ?? [] where !box.isDeleted {
             textBoxes.showView(for: box)
@@ -186,11 +195,19 @@ final class NotebookCanvasController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        guard canvasView.bounds.width > 0 else { return }
+        // Wait for a real size: restoring against a provisional zero height
+        // puts the saved spot half a screen off.
+        let size = canvasView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
         if !didRestoreViewport {
             didRestoreViewport = true
             restoreViewport()
+        } else if lastLayoutSize != .zero, size != lastLayoutSize {
+            // Rotation, split view or the toolbar hiding: keep the same spot centered.
+            canvasView.contentOffset.x += (lastLayoutSize.width - size.width) / 2
+            canvasView.contentOffset.y += (lastLayoutSize.height - size.height) / 2
         }
+        lastLayoutSize = size
         updateDots()
         images.updateOverlay()
     }
@@ -262,6 +279,21 @@ final class NotebookCanvasController: UIViewController {
         return true
     }
 
+    /// The Ask tool: circle something on the page to ask Claude about it.
+    func setAskMode(_ on: Bool) {
+        if on {
+            images.deselect()
+            view.endEditing(true)
+        }
+        askLasso.isActive = on
+    }
+
+    private func finishAsk(in rect: CGRect) {
+        guard let image = askLasso.snapshot(of: view, rect: rect) else { return }
+        askLasso.isActive = false
+        onAskSelection?(image)
+    }
+
     /// Puts an image (from the Photos picker) in the middle of the screen.
     func addImage(data: Data) {
         let visibleCenter = CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY)
@@ -306,13 +338,38 @@ final class NotebookCanvasController: UIViewController {
         let viewport = page.viewport
             ?? Viewport(centerX: start + size.width / 2, centerY: start + size.height / 2, zoom: 1)
         let zoom = min(max(viewport.zoom, canvasView.minimumZoomScale), canvasView.maximumZoomScale)
+        var center = CGPoint(x: viewport.centerX, y: viewport.centerY)
+
+        // Safety net: never open on empty paper when the page has something on it.
+        let visible = CGRect(
+            x: center.x - size.width / zoom / 2,
+            y: center.y - size.height / zoom / 2,
+            width: size.width / zoom,
+            height: size.height / zoom
+        )
+        if let content = contentBounds(), !visible.intersects(content) {
+            center = CGPoint(x: content.midX, y: content.midY)
+        }
+
         canvasView.zoomScale = zoom
         canvasView.contentOffset = CGPoint(
-            x: viewport.centerX * zoom - size.width / 2,
-            y: viewport.centerY * zoom - size.height / 2
+            x: center.x * zoom - size.width / 2,
+            y: center.y * zoom - size.height / 2
         )
         updateTextLayerScale()
         updateTextSharpness()
+    }
+
+    /// Everything on the page (ink, text, images), in canvas points.
+    private func contentBounds() -> CGRect? {
+        var bounds = canvasView.drawing.strokes.isEmpty ? CGRect.null : canvasView.drawing.bounds
+        for box in page.textBoxes ?? [] where !box.isDeleted {
+            bounds = bounds.union(CGRect(x: box.x, y: box.y, width: box.width, height: 44))
+        }
+        for image in page.images ?? [] where !image.isDeleted {
+            bounds = bounds.union(image.frame)
+        }
+        return bounds.isNull ? nil : bounds
     }
 
     private func currentViewport() -> Viewport {
@@ -326,7 +383,10 @@ final class NotebookCanvasController: UIViewController {
     }
 
     private func saveViewport() {
-        guard isModelAlive, didRestoreViewport else { return }
+        // Only while the canvas is on screen with a real size; a canvas being
+        // torn down can report a size that would save the wrong spot.
+        guard isModelAlive, didRestoreViewport, canvasView.window != nil,
+              canvasView.bounds.width > 0, canvasView.bounds.height > 0 else { return }
         page.viewport = currentViewport()
         try? modelContext.save()
     }

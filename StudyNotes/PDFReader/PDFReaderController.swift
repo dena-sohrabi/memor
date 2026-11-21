@@ -35,6 +35,9 @@ final class PDFReaderController: UIViewController {
     private let positionDebouncer = Debouncer()
     private var eraserReturn: EraserAutoReturn?
     private var undoTaps: UndoTapGestures?
+    /// Gets a picture of the area circled with the Ask tool.
+    var onAskSelection: ((UIImage) -> Void)?
+    private let askLasso = AskLassoView()
 
     private lazy var textBoxes = TextBoxCoordinator(modelContext: modelContext, hooks: .init(
         undoManager: { [weak self] in self?.undoManager },
@@ -121,6 +124,11 @@ final class PDFReaderController: UIViewController {
             redo: { [weak self] in self?.redo() ?? false }
         )
 
+        askLasso.frame = view.bounds
+        askLasso.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        askLasso.onSelection = { [weak self] rect in self?.finishAsk(in: rect) }
+        view.addSubview(askLasso)
+
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
 
@@ -170,6 +178,18 @@ final class PDFReaderController: UIViewController {
         } else {
             toolPicker.setVisible(false, forFirstResponder: self)
         }
+    }
+
+    /// The Ask tool: circle part of a page to ask Claude about it.
+    func setAskMode(_ on: Bool) {
+        if on { view.endEditing(true) }
+        askLasso.isActive = on
+    }
+
+    private func finishAsk(in rect: CGRect) {
+        guard let image = askLasso.snapshot(of: view, rect: rect) else { return }
+        askLasso.isActive = false
+        onAskSelection?(image)
     }
 
     func setPageSidebarVisible(_ visible: Bool) {

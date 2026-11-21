@@ -20,7 +20,19 @@ Every notebook and PDF opens in its own window, so you can keep several side by 
 - **Infinite canvas:** pinch to zoom from 25% to 400%, pan in every direction, and pick up where you left off. The dots stay lined up with your ink as you zoom.
 - **Pencil and text:** the full PencilKit tool picker for ink, plus text boxes you can move and resize. Scribble turns handwriting in a text box into typed text, and typing on a hardware keyboard starts a new box.
 - **PDF annotations:** highlight text in four colors with a Pencil swipe or from the text menu, write on pages, and add text notes. Your original PDF files are never modified.
-- **Everything stays on your iPad.** No accounts, no tracking, no network.
+- **Ask Claude:** circle any part of a notebook page or PDF and a glass side panel opens. If you circled a question, Claude answers it; otherwise it explains what's there, and you can ask follow-ups. Uses Claude Opus 5.5 with your own Anthropic API key.
+- **Private by default.** No accounts, no analytics, no tracking. Your notes and PDFs stay on your iPad. The only thing that ever leaves it is what you choose to send with Ask Claude: the circled area and your questions go straight to Anthropic, never to a Memor server (there isn't one).
+
+## Your API key
+
+Ask Claude needs an API key from [platform.claude.com](https://platform.claude.com) (a Claude Pro or Max subscription can't be used by other apps). Memor is built so the key can't leak:
+
+- It's stored only in the iPad's Keychain, with `WhenUnlockedThisDeviceOnly`: readable only while the iPad is unlocked, never synced to iCloud, never in backups.
+- It's never written to the database, files, `UserDefaults` or logs, and never kept in app state. It's read from the Keychain for each request.
+- It's sent only to `api.anthropic.com` over HTTPS (TLS 1.2+), on an ephemeral connection with no cache or cookies. Redirects are refused, so the key header can't be forwarded to another host.
+- A new key is checked with a free request before it's saved, and you can remove it any time.
+
+See [`StudyNotes/Ask`](StudyNotes/Ask) for the code.
 
 ## Requirements
 

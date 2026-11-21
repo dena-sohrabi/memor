@@ -12,9 +12,35 @@ final class NotebookEditor {
     let toolPicker = PKToolPicker()
     @ObservationIgnored weak var controller: NotebookCanvasController?
 
+    /// Circle-to-ask: the Ask tool is on, and the conversation in the side panel.
+    var isAskMode = false
+    var askSession: AskSession?
+
     func setTextMode(_ on: Bool) {
+        if on, isAskMode { setAskMode(false) }
         isTextMode = on
         controller?.applyTextMode(on)
+    }
+
+    func setAskMode(_ on: Bool) {
+        if on, isTextMode { setTextMode(false) }
+        isAskMode = on
+        controller?.setAskMode(on)
+    }
+
+    /// Opens the side panel and asks Claude about the circled area.
+    func didCircle(_ image: UIImage) {
+        isAskMode = false
+        askSession?.cancel()
+        let session = AskSession(image: image)
+        askSession = session
+        session.start()
+    }
+
+    func closeAsk() {
+        askSession?.cancel()
+        askSession = nil
+        setAskMode(false)
     }
 
     func undo() { controller?.undo() }
@@ -34,6 +60,9 @@ struct NotebookPageScreen: View {
     @State private var editor = NotebookEditor()
     @State private var pageID: UUID
     @State private var photoItem: PhotosPickerItem?
+    /// Hides the top toolbar so the page fills the window.
+    @State private var hidesToolbar = false
+    @State private var showsKeySettings = false
 
     init(notebook: Notebook, page: NotebookPage) {
         self.notebook = notebook
@@ -52,9 +81,40 @@ struct NotebookPageScreen: View {
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)
-        .navigationTitle(index.map { pages[$0].displayTitle(number: $0 + 1) } ?? "")
+        .overlay(alignment: .topTrailing) {
+            if hidesToolbar {
+                Button {
+                    withAnimation(.snappy) { hidesToolbar = false }
+                } label: {
+                    Label("Show Toolbar", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .labelStyle(.iconOnly)
+                        .padding(4)
+                }
+                .buttonStyle(.glass)
+                .padding(.top, 12)
+                .padding(.trailing, 16)
+                .transition(.opacity)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if let session = editor.askSession {
+                AskPanel(session: session) {
+                    withAnimation(.snappy) { editor.closeAsk() }
+                }
+                .padding(.vertical, 12)
+                .padding(.trailing, 12)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: editor.askSession?.id)
+        .sheet(isPresented: $showsKeySettings) {
+            APIKeySettingsView { editor.setAskMode(true) }
+        }
+        // Tap the title to rename the page.
+        .navigationTitle(index.map { Bindable(pages[$0]).editableTitle } ?? .constant(""))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
+        .toolbar(hidesToolbar ? .hidden : .visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 LibraryButton()
@@ -70,11 +130,26 @@ struct NotebookPageScreen: View {
                     Label("Text", systemImage: "character.textbox")
                 }
                 .toggleStyle(.button)
+                Toggle(isOn: Binding(get: { editor.isAskMode }, set: { on in
+                    if on, !APIKeyStore.hasKey {
+                        showsKeySettings = true
+                    } else {
+                        editor.setAskMode(on)
+                    }
+                })) {
+                    Label("Ask Claude", systemImage: "sparkles")
+                }
+                .toggleStyle(.button)
                 Button { editor.undo() } label: {
                     Label("Undo", systemImage: "arrow.uturn.backward")
                 }
                 Button { editor.redo() } label: {
                     Label("Redo", systemImage: "arrow.uturn.forward")
+                }
+                Button {
+                    withAnimation(.snappy) { hidesToolbar = true }
+                } label: {
+                    Label("Hide Toolbar", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
         }
@@ -94,6 +169,7 @@ struct NotebookPageScreen: View {
     }
 
     private func addPage(after page: NotebookPage?) {
+        editor.setAskMode(false)
         editor.leaveCurrentPage()
         let newPage = notebook.addPage(after: page, in: modelContext)
         Thumbnails.writeBlankNotebookThumbnail(id: newPage.id)
@@ -116,6 +192,7 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
             isTextMode: editor.isTextMode
         )
         controller.onTextModeEnded = { [weak editor] in editor?.isTextMode = false }
+        controller.onAskSelection = { [weak editor] image in editor?.didCircle(image) }
         editor.controller = controller
         return controller
     }

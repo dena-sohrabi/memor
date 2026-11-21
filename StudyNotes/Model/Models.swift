@@ -102,6 +102,23 @@ final class NotebookPage {
     }
 }
 
+extension NotebookPage {
+    /// The page's position in its notebook, from 1.
+    var number: Int {
+        (notebook?.sortedPages.firstIndex { $0.id == id } ?? 0) + 1
+    }
+
+    /// The title as shown and edited: "Page 3" until renamed. Renaming it
+    /// back to the default name, or to nothing, clears the custom title.
+    var editableTitle: String {
+        get { displayTitle(number: number) }
+        set {
+            let newTitle = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            title = newTitle.isEmpty || newTitle == "Page \(number)" ? "" : newTitle
+        }
+    }
+}
+
 extension Notebook {
     /// Pages in notebook order.
     var sortedPages: [NotebookPage] {
