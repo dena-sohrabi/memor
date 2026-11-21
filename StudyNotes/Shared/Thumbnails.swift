@@ -7,8 +7,13 @@ enum Thumbnails {
 
     /// Renders a notebook thumbnail and writes it to the cache.
     @MainActor
-    static func writeNotebookThumbnail(id: UUID, drawing: PKDrawing, textBoxes: [(frame: CGRect, text: NSAttributedString)]) {
-        let image = renderNotebook(drawing: drawing, textBoxes: textBoxes)
+    static func writeNotebookThumbnail(
+        id: UUID,
+        drawing: PKDrawing,
+        textBoxes: [(frame: CGRect, text: NSAttributedString)],
+        images: [(frame: CGRect, image: UIImage)] = []
+    ) {
+        let image = renderNotebook(drawing: drawing, textBoxes: textBoxes, images: images)
         try? image.pngData()?.write(to: FileStore.thumbnailURL(for: id), options: .atomic)
     }
 
@@ -19,10 +24,17 @@ enum Thumbnails {
     }
 
     @MainActor
-    private static func renderNotebook(drawing: PKDrawing, textBoxes: [(frame: CGRect, text: NSAttributedString)]) -> UIImage {
+    private static func renderNotebook(
+        drawing: PKDrawing,
+        textBoxes: [(frame: CGRect, text: NSAttributedString)],
+        images: [(frame: CGRect, image: UIImage)]
+    ) -> UIImage {
         var content = drawing.strokes.isEmpty ? CGRect.null : drawing.bounds
         for box in textBoxes {
             content = content.union(box.frame)
+        }
+        for image in images {
+            content = content.union(image.frame)
         }
         let size = notebookSize
         let format = UIGraphicsImageRendererFormat()
@@ -50,7 +62,7 @@ enum Thumbnails {
         }
 
         return renderer.image { context in
-            UIColor.white.setFill()
+            Paper.color.setFill()
             context.fill(CGRect(origin: .zero, size: size))
             let cg = context.cgContext
             cg.translateBy(x: (size.width - frame.width * scale) / 2, y: (size.height - frame.height * scale) / 2)
@@ -71,6 +83,10 @@ enum Thumbnails {
             let radius = max(DotGrid.radius * scale, 1.2) / scale
             DotGrid.fill(in: cg, rect: visible, origin: .zero, cell: cell, radius: radius)
 
+            // Same order as the page: images, then ink, then text.
+            for image in images {
+                image.image.draw(in: image.frame)
+            }
             inkImage?.draw(in: frame)
             for box in textBoxes {
                 box.text.draw(with: box.frame.insetBy(dx: 6, dy: 8), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)

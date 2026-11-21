@@ -2,15 +2,19 @@ import PencilKit
 import SwiftData
 import UIKit
 
-/// A `PKCanvasView` that keeps the text-box layer on top and reports typed
-/// characters, so typing on a hardware keyboard with nothing focused starts
-/// a new text box.
+/// A `PKCanvasView` that keeps the image layer behind the ink and the
+/// text-box layer on top, and reports typed characters, so typing on a
+/// hardware keyboard with nothing focused starts a new text box.
 final class NotebookCanvasView: PKCanvasView {
+    weak var imageLayer: UIView?
     weak var textLayer: UIView?
     var onTypedCharacters: ((String) -> Bool)?
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let imageLayer, subviews.first !== imageLayer {
+            sendSubviewToBack(imageLayer)
+        }
         if let textLayer, subviews.last !== textLayer {
             bringSubviewToFront(textLayer)
         }
@@ -37,15 +41,15 @@ final class NotebookCanvasView: PKCanvasView {
     }
 }
 
-/// One notebook page: an infinite canvas of PencilKit ink plus typed text
-/// boxes, on dotted paper.
+/// One notebook page: an infinite canvas of PencilKit ink, images and typed
+/// text boxes, on dotted paper.
 ///
 /// The canvas is a 100,000-point square and a new page starts in the
 /// middle, so there's room in every direction (about 85 screens each way at
-/// 100%). Text boxes live in `textLayer`, a subview of the canvas that is
-/// scaled to match the canvas zoom, so box frames are in canvas points. The
-/// canvas itself is transparent, with the dots drawn by `DotGridView`
-/// behind it.
+/// 100%). Images live in `imageLayer` (behind the ink) and text boxes in
+/// `textLayer` (in front); both are subviews of the canvas scaled to match
+/// its zoom, so their frames are in canvas points. The canvas itself is
+/// transparent, with the dots drawn by `DotGridView` behind it.
 ///
 /// Switching pages replaces this controller with a new one.
 final class NotebookCanvasController: UIViewController {
@@ -57,7 +61,12 @@ final class NotebookCanvasController: UIViewController {
 
     private let canvasView = NotebookCanvasView()
     private let dotGrid = DotGridView()
+    private let imageLayer = UIView()
+    private let imageOverlay = ImageSelectionOverlay()
     private let textLayer = PassthroughView()
+    private var eraserReturn: EraserAutoReturn?
+    private var undoTaps: UndoTapGestures?
+    private var quickLine: QuickLine?
     /// Shared by every page in the window, so the chosen pen stays.
     private let toolPicker: PKToolPicker
     private let saveDebouncer = Debouncer()
@@ -80,6 +89,18 @@ final class NotebookCanvasController: UIViewController {
         editingEnded: { [weak self] in self?.restoreCanvasFocusSoon() }
     ))
 
+    private lazy var images = CanvasImageCoordinator(
+        page: page,
+        modelContext: modelContext,
+        canvasView: canvasView,
+        imageLayer: imageLayer,
+        overlay: imageOverlay,
+        hooks: .init(
+            undoManager: { [weak self] in self?.canvasView.undoManager },
+            contentChanged: { [weak self] in self?.scheduleSave() }
+        )
+    )
+
     init(page: NotebookPage, modelContext: ModelContext, toolPicker: PKToolPicker, isTextMode: Bool) {
         self.page = page
         self.modelContext = modelContext
@@ -96,14 +117,16 @@ final class NotebookCanvasController: UIViewController {
         super.viewDidLoad()
         // Paper stays light in dark mode, so ink colors and text match the thumbnails.
         view.overrideUserInterfaceStyle = .light
-        view.backgroundColor = .white
+        view.backgroundColor = Paper.color
         view.addSubview(dotGrid)
 
         canvasView.frame = view.bounds
         canvasView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
-        canvasView.drawingPolicy = .default
+        // Only the Pencil draws. Fingers scroll, zoom and select images,
+        // whatever the system's "Only Draw with Apple Pencil" setting says.
+        canvasView.drawingPolicy = .pencilOnly
         canvasView.minimumZoomScale = 0.25
         canvasView.maximumZoomScale = 4
         canvasView.contentInsetAdjustmentBehavior = .never
@@ -115,11 +138,22 @@ final class NotebookCanvasController: UIViewController {
         canvasView.contentSize = CGSize(width: Self.canvasExtent, height: Self.canvasExtent)
         view.addSubview(canvasView)
 
-        textLayer.layer.anchorPoint = .zero
-        textLayer.bounds = CGRect(x: 0, y: 0, width: Self.canvasExtent, height: Self.canvasExtent)
-        textLayer.layer.position = .zero
+        for layer in [imageLayer, textLayer] {
+            layer.layer.anchorPoint = .zero
+            layer.bounds = CGRect(x: 0, y: 0, width: Self.canvasExtent, height: Self.canvasExtent)
+            layer.layer.position = .zero
+        }
+        imageLayer.isUserInteractionEnabled = false
+        canvasView.insertSubview(imageLayer, at: 0)
+        canvasView.imageLayer = imageLayer
         canvasView.addSubview(textLayer)
         canvasView.textLayer = textLayer
+
+        imageOverlay.frame = view.bounds
+        imageOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.addSubview(imageOverlay)
+
+        images.showAll()
         for box in page.textBoxes ?? [] where !box.isDeleted {
             textBoxes.showView(for: box)
         }
@@ -139,6 +173,15 @@ final class NotebookCanvasController: UIViewController {
         toolPicker.addObserver(canvasView)
         toolPicker.addObserver(self)
         toolPicker.setVisible(true, forFirstResponder: canvasView)
+        eraserReturn = EraserAutoReturn(toolPicker: toolPicker)
+        quickLine = QuickLine(canvasView: canvasView, previewHost: view)
+
+        undoTaps = UndoTapGestures(
+            on: canvasView,
+            toastHost: view,
+            undo: { [weak self] in self?.undo() ?? false },
+            redo: { [weak self] in self?.redo() ?? false }
+        )
     }
 
     override func viewDidLayoutSubviews() {
@@ -149,6 +192,7 @@ final class NotebookCanvasController: UIViewController {
             restoreViewport()
         }
         updateDots()
+        images.updateOverlay()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -177,10 +221,12 @@ final class NotebookCanvasController: UIViewController {
     func tearDown() {
         isLeaving = true
         view.endEditing(true)
+        images.deselect()
         saveNow()
         clearUndo()
         toolPicker.removeObserver(canvasView)
         toolPicker.removeObserver(self)
+        eraserReturn?.stop()
     }
 
     /// The undo steps point at this canvas and its boxes, which are going away.
@@ -194,23 +240,33 @@ final class NotebookCanvasController: UIViewController {
         isTextMode = on
         textTap.isEnabled = on
         canvasView.drawingGestureRecognizer.isEnabled = !on
+        images.isEnabled = !on
         if !on { view.endEditing(true) }
     }
 
-    func undo() {
-        if let box = textBoxes.editingBox {
-            box.textView.undoManager?.undo()
-        } else {
-            canvasView.undoManager?.undo()
-        }
+    /// Returns whether there was anything to undo.
+    @discardableResult
+    func undo() -> Bool {
+        let manager = textBoxes.editingBox?.textView.undoManager ?? canvasView.undoManager
+        guard let manager, manager.canUndo else { return false }
+        manager.undo()
+        return true
     }
 
-    func redo() {
-        if let box = textBoxes.editingBox {
-            box.textView.undoManager?.redo()
-        } else {
-            canvasView.undoManager?.redo()
-        }
+    /// Returns whether there was anything to redo.
+    @discardableResult
+    func redo() -> Bool {
+        let manager = textBoxes.editingBox?.textView.undoManager ?? canvasView.undoManager
+        guard let manager, manager.canRedo else { return false }
+        manager.redo()
+        return true
+    }
+
+    /// Puts an image (from the Photos picker) in the middle of the screen.
+    func addImage(data: Data) {
+        let visibleCenter = CGPoint(x: canvasView.bounds.midX, y: canvasView.bounds.midY)
+        let center = canvasView.convert(visibleCenter, to: imageLayer)
+        Task { await images.importImage(data: data, centeredAt: center) }
     }
 
     // MARK: Saving
@@ -228,7 +284,7 @@ final class NotebookCanvasController: UIViewController {
         let drawing = canvasView.drawing
         page.drawingData = drawing.dataRepresentation()
         let boxes = textBoxes.allViews.map { (frame: $0.frame, text: $0.textView.attributedText ?? NSAttributedString()) }
-        Thumbnails.writeNotebookThumbnail(id: page.id, drawing: drawing, textBoxes: boxes)
+        Thumbnails.writeNotebookThumbnail(id: page.id, drawing: drawing, textBoxes: boxes, images: images.thumbnailImages)
         // Bumped after the thumbnail is written, because the page list and
         // the library card reload their thumbnails when these change.
         page.modifiedAt = .now
@@ -277,7 +333,9 @@ final class NotebookCanvasController: UIViewController {
 
     private func updateTextLayerScale() {
         let zoom = canvasView.zoomScale
-        textLayer.transform = CGAffineTransform(scaleX: zoom, y: zoom)
+        let scale = CGAffineTransform(scaleX: zoom, y: zoom)
+        textLayer.transform = scale
+        imageLayer.transform = scale
     }
 
     private func updateTextSharpness() {
@@ -321,16 +379,31 @@ final class NotebookCanvasController: UIViewController {
 
 extension NotebookCanvasController: PKCanvasViewDelegate {
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+        quickLine?.drawingDidChange()
         scheduleSave()
+    }
+
+    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        // Writing with the Pencil ends image editing.
+        images.deselect()
+        // A hand resting on the screen while writing mustn't scroll the page.
+        canvasView.isScrollEnabled = false
+    }
+
+    func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        canvasView.isScrollEnabled = true
+        eraserReturn?.canvasDidEndUsingTool()
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateDots()
+        images.updateOverlay()
     }
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
         updateTextLayerScale()
         updateDots()
+        images.updateOverlay()
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {

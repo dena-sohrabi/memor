@@ -90,6 +90,8 @@ final class NotebookPage {
 
     @Relationship(deleteRule: .cascade, inverse: \TextBox.notebookPage)
     var textBoxes: [TextBox]? = []
+    @Relationship(deleteRule: .cascade, inverse: \CanvasImage.page)
+    var images: [CanvasImage]? = []
 
     init(sortIndex: Int = 0) {
         self.sortIndex = sortIndex
@@ -223,6 +225,44 @@ final class PageInk {
     }
 }
 
+/// An image on a notebook page. It sits under the ink, so you can write on it.
+@Model
+final class CanvasImage {
+    var id: UUID = UUID()
+    /// Frame in canvas points.
+    var x: Double = 0
+    var y: Double = 0
+    var width: Double = 300
+    var height: Double = 200
+    /// A locked image can't be moved, resized or deleted until it's unlocked.
+    var isLocked: Bool = false
+    /// Stacking order on the page. Higher is on top.
+    var zIndex: Int = 0
+    var createdAt: Date = Date.now
+    /// JPEG (or PNG when it has transparency), at most 2048 pixels on its longest side.
+    @Attribute(.externalStorage) var imageData: Data? = nil
+    var page: NotebookPage? = nil
+
+    var frame: CGRect {
+        get { CGRect(x: x, y: y, width: width, height: height) }
+        set {
+            x = newValue.origin.x
+            y = newValue.origin.y
+            width = newValue.size.width
+            height = newValue.size.height
+        }
+    }
+
+    init(id: UUID = UUID(), frame: CGRect, imageData: Data?) {
+        self.id = id
+        self.x = frame.origin.x
+        self.y = frame.origin.y
+        self.width = frame.size.width
+        self.height = frame.size.height
+        self.imageData = imageData
+    }
+}
+
 /// A typed text box. Used both on notebook canvases and on PDF pages.
 @Model
 final class TextBox {
@@ -279,6 +319,33 @@ struct TextBoxSnapshot: Sendable {
         box.richText = richText
         box.plainText = plainText
         return box
+    }
+}
+
+/// Everything needed to bring back a deleted canvas image.
+struct CanvasImageSnapshot: Sendable {
+    let id: UUID
+    let frame: CGRect
+    let isLocked: Bool
+    let zIndex: Int
+    let createdAt: Date
+    let imageData: Data?
+
+    init(_ image: CanvasImage) {
+        id = image.id
+        frame = image.frame
+        isLocked = image.isLocked
+        zIndex = image.zIndex
+        createdAt = image.createdAt
+        imageData = image.imageData
+    }
+
+    func makeModel() -> CanvasImage {
+        let image = CanvasImage(id: id, frame: frame, imageData: imageData)
+        image.isLocked = isLocked
+        image.zIndex = zIndex
+        image.createdAt = createdAt
+        return image
     }
 }
 

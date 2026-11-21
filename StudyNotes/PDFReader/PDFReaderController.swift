@@ -33,6 +33,8 @@ final class PDFReaderController: UIViewController {
     private var didRestorePosition = false
     private let saveDebouncer = Debouncer()
     private let positionDebouncer = Debouncer()
+    private var eraserReturn: EraserAutoReturn?
+    private var undoTaps: UndoTapGestures?
 
     private lazy var textBoxes = TextBoxCoordinator(modelContext: modelContext, hooks: .init(
         undoManager: { [weak self] in self?.undoManager },
@@ -111,6 +113,14 @@ final class PDFReaderController: UIViewController {
         pdfView.addGestureRecognizer(tap)
         pdfView.addInteraction(editMenu)
 
+        eraserReturn = EraserAutoReturn(toolPicker: toolPicker)
+        undoTaps = UndoTapGestures(
+            on: pdfView,
+            toastHost: view,
+            undo: { [weak self] in self?.undo() ?? false },
+            redo: { [weak self] in self?.redo() ?? false }
+        )
+
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
         NotificationCenter.default.addObserver(self, selector: #selector(scaleChanged), name: .PDFViewScaleChanged, object: pdfView)
 
@@ -174,20 +184,22 @@ final class PDFReaderController: UIViewController {
         pdfView.go(to: page)
     }
 
-    func undo() {
-        if let box = textBoxes.editingBox {
-            box.textView.undoManager?.undo()
-        } else {
-            undoManager?.undo()
-        }
+    /// Returns whether there was anything to undo.
+    @discardableResult
+    func undo() -> Bool {
+        let manager = textBoxes.editingBox?.textView.undoManager ?? undoManager
+        guard let manager, manager.canUndo else { return false }
+        manager.undo()
+        return true
     }
 
-    func redo() {
-        if let box = textBoxes.editingBox {
-            box.textView.undoManager?.redo()
-        } else {
-            undoManager?.redo()
-        }
+    /// Returns whether there was anything to redo.
+    @discardableResult
+    func redo() -> Bool {
+        let manager = textBoxes.editingBox?.textView.undoManager ?? undoManager
+        guard let manager, manager.canRedo else { return false }
+        manager.redo()
+        return true
     }
 
     private func restoreFocusSoon() {
@@ -516,6 +528,10 @@ extension PDFReaderController: PKCanvasViewDelegate {
         guard let overlay = canvasView.superview as? PageOverlayView else { return }
         dirtyInkPages.insert(overlay.pageIndex)
         scheduleSave()
+    }
+
+    func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        eraserReturn?.canvasDidEndUsingTool()
     }
 }
 

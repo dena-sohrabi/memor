@@ -1,5 +1,10 @@
 import UIKit
 
+/// The color of notebook paper: a soft, slightly yellow cream, like old paper.
+enum Paper {
+    static let color = UIColor(red: 0.980, green: 0.957, blue: 0.890, alpha: 1)
+}
+
 /// The dotted paper of notebook pages. Dots sit on a square grid in canvas
 /// points, so they stay under your ink as you scroll and zoom.
 enum DotGrid {
@@ -7,7 +12,8 @@ enum DotGrid {
     static let spacing: CGFloat = 24
     /// Dot radius at 100% zoom, in canvas points.
     static let radius: CGFloat = 1.1
-    static let color = UIColor(white: 0.78, alpha: 1)
+    /// A warm gray that sits quietly on the cream paper.
+    static let color = UIColor(red: 0.79, green: 0.75, blue: 0.66, alpha: 1)
 
     /// Distance between the dots that get drawn at `zoom`, in screen points.
     /// Zoomed far out, only every 2nd (or 4th…) dot is drawn, so the paper

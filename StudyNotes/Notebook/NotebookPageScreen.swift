@@ -1,4 +1,5 @@
 import PencilKit
+import PhotosUI
 import SwiftData
 import SwiftUI
 
@@ -18,6 +19,7 @@ final class NotebookEditor {
 
     func undo() { controller?.undo() }
     func redo() { controller?.redo() }
+    func addImage(_ data: Data) { controller?.addImage(data: data) }
     func saveNow() { controller?.saveNow() }
     /// Saves the page on screen before another page replaces it.
     func leaveCurrentPage() { controller?.prepareToLeave() }
@@ -31,6 +33,7 @@ struct NotebookPageScreen: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var editor = NotebookEditor()
     @State private var pageID: UUID
+    @State private var photoItem: PhotosPickerItem?
 
     init(notebook: Notebook, page: NotebookPage) {
         self.notebook = notebook
@@ -45,7 +48,7 @@ struct NotebookPageScreen: View {
                 NotebookCanvasRepresentable(page: pages[index], editor: editor, modelContext: modelContext)
                     .id(pages[index].id)
             } else {
-                Color.white
+                Color(uiColor: Paper.color)
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)
@@ -59,6 +62,9 @@ struct NotebookPageScreen: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { addPage(after: index.map { pages[$0] }) } label: {
                     Label("New page", systemImage: "doc.badge.plus")
+                }
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    Label("Add Image", systemImage: "photo")
                 }
                 Toggle(isOn: Binding(get: { editor.isTextMode }, set: { editor.setTextMode($0) })) {
                     Label("Text", systemImage: "character.textbox")
@@ -74,6 +80,15 @@ struct NotebookPageScreen: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { editor.saveNow() }
+        }
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    editor.addImage(data)
+                }
+                photoItem = nil
+            }
         }
         .onDisappear { editor.saveNow() }
     }

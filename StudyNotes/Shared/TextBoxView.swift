@@ -386,7 +386,7 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
 // MARK: - Helpers
 
 /// A container that only takes touches that land on one of its subviews.
-final class PassthroughView: UIView {
+class PassthroughView: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
         return hit === self ? nil : hit
