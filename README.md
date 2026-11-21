@@ -30,7 +30,7 @@ Every notebook and PDF opens in its own window, so you can keep several side by 
 ## Building
 
 1. Clone the repo and open `StudyNotes.xcodeproj` in Xcode. (StudyNotes was the working name; the project keeps it.)
-2. Select the **StudyNotes** target, open **Signing & Capabilities**, choose your own team, and change the bundle identifier (`com.memor.app`) to one of your own.
+2. Select the **StudyNotes** target, open **Signing & Capabilities**, choose your own team, and change the bundle identifier (`com.denasohrabi.memor`) to one of your own.
 3. Pick your iPad as the run destination and press Run.
 
 From the command line:
