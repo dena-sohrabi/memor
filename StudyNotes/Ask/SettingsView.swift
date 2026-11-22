@@ -1,33 +1,36 @@
 import SwiftUI
 
 /// Memor's settings, grouped like the iPad's own:
-/// - Ask Claude: your Claude API key, on a page of its own.
-/// - Study Pal: her name, her memory, voice conversations, her voice and
-///   her sounds.
-/// - Voice and Pictures: your optional OpenAI key.
+/// - Study Pal: which model is her mind (Claude or GPT), and your API keys.
+///   Claude needs an Anthropic key; her voice and her pictures need an
+///   OpenAI key either way.
+/// - Her name, her memory, reading replies aloud, her voice, her sounds,
+///   and staying on screen outside Memor.
 /// - About: what leaves your iPad, and the version.
 ///
-/// Opened because Ask Claude needs a key (`onKeySaved` set), it goes
-/// straight to the Claude key, and closes once one is saved.
+/// Opened without any key, it goes straight to the Anthropic key, and
+/// closes once one is saved.
 struct SettingsView: View {
-    var onKeySaved: (() -> Void)?
-
     @Environment(\.dismiss) private var dismiss
     @AppStorage(StudyPalVoice.isEnabledKey) private var palSounds = true
     @AppStorage(StudyPalSpeaker.isEnabledKey) private var palSpeaks = true
     @AppStorage(StudyPalSpeaker.voiceKey) private var palVoice = StudyPalSpeaker.defaultVoice
     @AppStorage(StudyPalCharacter.nameKey) private var palName = ""
     @AppStorage(PalMemoryStore.isOnKey) private var remembers = true
+    @AppStorage(PalMind.settingKey) private var mind = PalMind.claude.rawValue
+    @AppStorage(PalWakeListener.isEnabledKey) private var wakeWord = true
     @State private var hasClaudeKey = APIKeyStore.hasKey
     @State private var hasOpenAIKey = OpenAIKeyStore.hasKey
+    /// Opened for a key: once it's saved, Settings closes.
+    @State private var opensForKey = PalMind.current == nil
 
     var body: some View {
         NavigationStack {
             Group {
-                if let onKeySaved {
+                if opensForKey {
                     APIKeyPage(kind: .claude) {
-                        onKeySaved()
-                        dismiss()
+                        keysChanged()
+                        if hasClaudeKey { dismiss() }
                     }
                 } else {
                     settings
@@ -39,21 +42,41 @@ struct SettingsView: View {
                 }
             }
         }
+        .onChange(of: mind) { Pal.shared.keyChanged() }
+    }
+
+    private func keysChanged() {
+        hasClaudeKey = APIKeyStore.hasKey
+        hasOpenAIKey = OpenAIKeyStore.hasKey
+        Pal.shared.keyChanged()
     }
 
     private var settings: some View {
         Form {
             Section {
-                NavigationLink {
-                    APIKeyPage(kind: .claude) { hasClaudeKey = APIKeyStore.hasKey }
+                Picker(selection: $mind) {
+                    ForEach(PalMind.allCases) { mind in
+                        Text(mind.title).tag(mind.rawValue)
+                    }
                 } label: {
-                    SettingsRow("Claude API Key", systemImage: "sparkles", color: .orange,
+                    SettingsLabel("Her Mind", systemImage: "brain.head.profile", color: .orange)
+                }
+                NavigationLink {
+                    APIKeyPage(kind: .claude) { keysChanged() }
+                } label: {
+                    SettingsRow("Anthropic API Key", systemImage: "key.fill", color: .orange,
                                 value: hasClaudeKey ? "Connected" : "Not Set Up")
                 }
+                NavigationLink {
+                    APIKeyPage(kind: .openAI) { keysChanged() }
+                } label: {
+                    SettingsRow("OpenAI API Key", systemImage: "key.fill", color: .teal,
+                                value: hasOpenAIKey ? "Connected" : "Not Set Up")
+                }
             } header: {
-                Text("Ask Claude")
+                Text("Study Pal")
             } footer: {
-                Text("Claude answers your questions, knows your page and can work on it with you.")
+                Text(mindFooter)
             }
 
             Section {
@@ -71,8 +94,12 @@ struct SettingsView: View {
                     SettingsRow("Memory", systemImage: "book.closed.fill", color: .indigo,
                                 value: remembers ? "On" : "Off")
                 }
+                Toggle(isOn: $wakeWord) {
+                    SettingsLabel("Listen for “Hey \(palName.isEmpty ? "Study Pal" : palName)”", systemImage: "ear.fill", color: .mint)
+                }
+                .onChange(of: wakeWord) { Pal.shared.wake.retry() }
                 Toggle(isOn: $palSpeaks) {
-                    SettingsLabel("Voice Conversations", systemImage: "phone.fill", color: .green)
+                    SettingsLabel("Read Replies Aloud", systemImage: "waveform", color: .green)
                 }
                 .disabled(!hasOpenAIKey)
                 NavigationLink {
@@ -85,25 +112,8 @@ struct SettingsView: View {
                 Toggle(isOn: $palSounds) {
                     SettingsLabel("Sounds", systemImage: "speaker.wave.2.fill", color: .pink)
                 }
-            } header: {
-                Text("Study Pal")
             } footer: {
-                Text(hasOpenAIKey
-                    ? "Switch between Voice and Chat beside her. Voice: tap her and talk, like a call. Chat: tap her and type, and Claude answers in the chat panel."
-                    : "Add an OpenAI key below to talk with her out loud.")
-            }
-
-            Section {
-                NavigationLink {
-                    APIKeyPage(kind: .openAI) { hasOpenAIKey = OpenAIKeyStore.hasKey }
-                } label: {
-                    SettingsRow("OpenAI API Key", systemImage: "waveform", color: .teal,
-                                value: hasOpenAIKey ? "Connected" : "Optional")
-                }
-            } header: {
-                Text("Voice and Pictures")
-            } footer: {
-                Text("Optional. Gives your study pal a voice, and lets Claude draw pictures for your page.")
+                Text("Say “Hey \(palName.isEmpty ? "Study Pal" : palName)” and what you want, and she answers when you pause; she listens for her name on this iPad only (the microphone dot shows while she does), and never while she's talking or hidden. Or use the mic beside her: hold it while you talk and let go, or tap it, talk and tap again. The switch beside her picks Voice (she talks back and listens for her name) or Chat (she only writes).")
             }
 
             Section {
@@ -123,6 +133,18 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var mindFooter: String {
+        let chosen = PalMind(rawValue: mind) ?? .claude
+        var text = chosen == .claude
+            ? "Claude Opus 5.5 thinks for her, with your Anthropic key."
+            : "GPT-6.2 Sol thinks for her, with your OpenAI key."
+        if !chosen.hasKey {
+            text += " Add its key above" + (PalMind.current.map { "; until then, \($0.title) does." } ?? ".")
+        }
+        text += " Her voice and the pictures she draws use your OpenAI key either way. A change takes effect from her next talk (or tap New Topic in her card)."
+        return text
     }
 
     private static var version: String {
@@ -201,7 +223,7 @@ enum APIKeyKind {
 
     var title: String {
         switch self {
-        case .claude: "Claude API Key"
+        case .claude: "Anthropic API Key"
         case .openAI: "OpenAI API Key"
         }
     }
@@ -216,9 +238,9 @@ enum APIKeyKind {
     var usage: String {
         switch self {
         case .claude:
-            "Claude answers what you ask your study pal, reads the page you're on and can add, move and tidy things on it. Your questions, the page you ask about and what you circle go straight to Anthropic."
+            "When Claude is her mind, your messages go to Anthropic: as text (your voice is turned into text on your iPad and never leaves it), with pictures of the pages on your screen, their text, what you circled or selected, and what she remembers about you and those notes. Claude's small model writes down what she should remember."
         case .openAI:
-            "Gives your study pal a voice. In Voice mode, OpenAI's realtime model talks with you as her: what you say (turned into text on your iPad), pictures of your page, its typed notes and what she remembers about you go to OpenAI, and she answers out loud and can write notes and draw pictures on your page. After a call, OpenAI writes down what she should remember. Your voice itself never leaves your iPad. Chat mode stays with Claude."
+            "Her voice and the pictures she draws come from OpenAI: what she says goes to OpenAI to be spoken, and what she wants drawn to be drawn. When GPT is her mind, your messages go to OpenAI the same way they'd go to Anthropic for Claude. Nothing is stored on OpenAI's side for the conversation."
         }
     }
 
@@ -349,12 +371,12 @@ private struct MemoryPage: View {
             Section {
                 Toggle("Remember Our Talks", isOn: $remembers)
             } footer: {
-                Text("After each call or chat, she writes down what's worth remembering: what you're studying, your exams, what helps you, how you like her to be, and what you talked about. It stays on this iPad and goes with your next talks, so she picks up where you left off and gets to know you. Swipe to delete anything.")
+                Text("She writes down what's worth remembering as you talk: about you and how you like her to be, which goes with every talk; about each notebook and PDF, which goes along only while it's open; and a line about each talk, which she looks up only when it helps. It all stays on this iPad. Swipe to delete anything.")
             }
 
             if store.isEmpty {
                 Section {
-                    Text("Nothing yet. Talk with her, and what she learns about you shows up here.")
+                    Text("Nothing yet. Talk with her, and what she learns shows up here.")
                         .foregroundStyle(.secondary)
                 }
             }
@@ -362,13 +384,24 @@ private struct MemoryPage: View {
             notes("About You", store.aboutNotes)
             notes("How She Is with You", store.styleNotes)
 
+            ForEach(store.itemsWithNotes, id: \.id) { entry in
+                Section("“\(entry.item.title)”") {
+                    ForEach(entry.item.notes) { note in
+                        Text(note.text)
+                    }
+                    .onDelete { offsets in
+                        for index in offsets { store.deleteItemNote(entry.item.notes[index].id, from: entry.id) }
+                    }
+                }
+            }
+
             let talks = store.recentTalks
             if !talks.isEmpty {
-                Section("Recent Talks") {
+                Section("Talks") {
                     ForEach(talks) { talk in
                         VStack(alignment: .leading, spacing: 3) {
                             Text(talk.summary)
-                            Text("\(talk.wasCall ? "Call" : "Chat"), \(talk.date.formatted(date: .abbreviated, time: .shortened))")
+                            Text(talk.date.formatted(date: .abbreviated, time: .shortened))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -416,13 +449,13 @@ private struct PrivacyPage: View {
     var body: some View {
         Form {
             Section("Stays on Your iPad") {
-                Text("Your notebooks, pages, PDFs and handwriting. Your API keys, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her memory of you, which you can read and delete in Settings → Memory.")
+                Text("Your notebooks, pages, PDFs and handwriting. Your API key, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her memory, which you can read and delete in Settings → Memory. Her reminders, which are notifications on this iPad.")
             }
-            Section("Sent to Anthropic") {
-                Text("In Chat mode, when you ask Claude something: your question as text, the page you're on, what you circled, and what she remembers about you. When a chat closes, Claude writes down what she should remember from it.")
+            Section("Sent to Her Mind (Anthropic or OpenAI), When You Message Her") {
+                Text("Your message as text, pictures of the pages on your screen and their text, what you circled or selected, what she remembers about you and those notes, and what she finds when she searches your notes for you. When a talk pauses, the same company's small model writes down what she should remember from it.")
             }
-            Section("Sent to OpenAI, Only with an OpenAI Key") {
-                Text("In Voice mode: what you say to your study pal, as text, pictures of the page you're on and its typed notes, so she can talk with you about it, what she remembers about you, and the descriptions of pictures she draws. When a call ends, OpenAI writes down what she should remember from it.")
+            Section("Sent to OpenAI for Her Voice and Pictures") {
+                Text("What she says, to be spoken in her voice, and descriptions of the pictures she draws.")
             }
             Section("Never") {
                 Text("No accounts, analytics or tracking, and no Memor server: everything goes straight from your iPad to the service it's for.")

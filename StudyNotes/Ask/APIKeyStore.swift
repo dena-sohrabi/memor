@@ -60,7 +60,7 @@ struct KeychainKey: Sendable {
     }
 }
 
-/// The user's Claude API key, for Ask Claude.
+/// The user's Anthropic API key, for the study pal's mind when it's Claude.
 enum APIKeyStore {
     private static let key = KeychainKey(service: "com.denasohrabi.memor.claude", account: "anthropic-api-key")
 
@@ -71,8 +71,8 @@ enum APIKeyStore {
     static func delete() { key.delete() }
 }
 
-/// The user's OpenAI API key: optional, for the study pal's voice and for
-/// the images Claude draws.
+/// The user's OpenAI API key: the study pal's voice, the pictures she
+/// draws, and her mind when it's GPT.
 enum OpenAIKeyStore {
     private static let key = KeychainKey(service: "com.denasohrabi.memor.openai", account: "openai-api-key")
 

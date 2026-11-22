@@ -57,7 +57,10 @@ struct NotebookScreen: View {
                 notebook.ensureFirstPage(in: modelContext)
                 try? modelContext.save()
             }
+            showRequestedPage()
         }
+        // The study pal went to a page of this notebook.
+        .onChange(of: PalNavigator.shared.request) { showRequestedPage() }
         .alert("Rename page", isPresented: isPresent($renamingPage), presenting: renamingPage) { page in
             TextField("Page name", text: $pageTitle)
             Button("Rename") { rename(page) }
@@ -104,6 +107,16 @@ struct NotebookScreen: View {
     private func open(_ page: NotebookPage) {
         notebook.currentPageID = page.id
         openedPage = page
+    }
+
+    /// Opens the page the study pal asked for, from the grid. (When a page
+    /// is already open, its screen switches pages itself.)
+    private func showRequestedPage() {
+        guard openedPage == nil,
+              let request = PalNavigator.shared.pending(for: notebook.id),
+              let page = notebook.sortedPages.first(where: { $0.id == request.pageID }) else { return }
+        PalNavigator.shared.done(request)
+        open(page)
     }
 
     /// Adds a page at the end and opens it.

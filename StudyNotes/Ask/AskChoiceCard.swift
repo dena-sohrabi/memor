@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// Options Claude wants you to pick from, in a small glass card: pictures
-/// in a grid, or plain choices as buttons. Tap one, or just tell her.
+/// Options the study pal wants you to pick from, in a small glass card:
+/// pictures in a grid, or plain choices as buttons. Tap one, or just tell her.
 struct AskChoiceCard: View {
-    let choice: AskSession.Choice
+    let choice: PalChoice
     let width: CGFloat
-    let onPick: (AskSession.Choice.Option) -> Void
+    let onPick: (PalChoice.Option) -> Void
     let onDismiss: () -> Void
 
     var body: some View {

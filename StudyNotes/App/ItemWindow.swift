@@ -1,7 +1,8 @@
 import SwiftData
 import SwiftUI
 
-/// The root of every notebook or PDF window.
+/// The root of every notebook or PDF window. The study pal sits on top
+/// while this is the window you're using.
 struct ItemWindow: View {
     let target: OpenTarget?
 
@@ -16,6 +17,7 @@ struct ItemWindow: View {
                 DeletedItemView(kind: "item")
             }
         }
+        .overlay { PalOverlay() }
     }
 }
 

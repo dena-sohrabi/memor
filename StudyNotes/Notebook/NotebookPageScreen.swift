@@ -12,12 +12,6 @@ final class NotebookEditor {
     let toolPicker = PKToolPicker()
     @ObservationIgnored weak var controller: NotebookCanvasController?
 
-    /// Circle-to-ask: the Ask tool is on, and the conversation in the side panel.
-    var isAskMode = false
-    var askSession: AskSession?
-    /// A part of the page you circled in voice mode, for the study pal to
-    /// talk about.
-    var voiceQuestion: VoiceQuestion?
     /// The toolbar and the pen palette are hidden, so the page fills the
     /// window. A tap on empty paper switches.
     var hidesChrome = false
@@ -43,80 +37,19 @@ final class NotebookEditor {
     func zoomToFit() { controller?.zoomToFit() }
 
     func setTextMode(_ on: Bool) {
-        if on, isAskMode { setAskMode(false) }
+        if on, Pal.shared.isCircling { Pal.shared.stopCircling() }
         isTextMode = on
         controller?.applyTextMode(on)
     }
 
-    func setAskMode(_ on: Bool) {
-        if on, isTextMode { setTextMode(false) }
-        isAskMode = on
-        controller?.setAskMode(on)
-    }
-
-    /// Opens a chat in the side panel: a new one for an area just circled
-    /// (it asks Claude right away), or a saved one from its marker.
-    func openAskThread(_ thread: AskThread) {
-        setAskMode(false)
-        // In voice mode, a new circled question goes to the study pal to talk
-        // about, and keeps no marker. (A saved chat reopens in the panel.)
-        if !thread.hasAnswer, StudyPalSpeaker.isVoiceMode {
-            controller?.askAnchor = thread.anchor
-            voiceQuestion = VoiceQuestion(text: "Here's the part of my page I circled. Can you help me with it?", image: thread.imageData)
-            controller?.deleteAskThread(thread.id)
-            return
+    /// Circle something on this page for the study pal.
+    func setCircling(_ on: Bool) {
+        if on {
+            if isTextMode { setTextMode(false) }
+            Pal.shared.startCircling(on: controller)
+        } else {
+            Pal.shared.stopCircling()
         }
-        askSession?.cancel()
-        let session = AskSession(thread: thread, surface: .notebook)
-        configure(session, anchor: thread.anchor)
-        askSession = session
-        if !thread.hasAnswer {
-            session.pageContext = controller?.askPageContext()
-            session.start()
-        }
-    }
-
-    /// What the study pal can do on this page in voice mode.
-    func voiceActions() -> AskPageActions? { controller }
-
-    /// A picture of the page and its typed notes, for voice mode.
-    func voicePageContext() -> PageContext? { controller?.askPageContext() }
-
-    /// A question about the page from the compose box, typed or dictated,
-    /// with nothing circled: Claude answers in the chat panel.
-    func startCompose(_ question: String) {
-        setAskMode(false)
-        askSession?.cancel()
-        let session = AskSession(image: nil, thread: nil, surface: .notebook)
-        configure(session, anchor: nil)
-        session.pageContext = controller?.askPageContext()
-        askSession = session
-        session.ask(question)
-    }
-
-    /// Lets Claude work on this page: what it adds goes beside the circled
-    /// area, or in view when nothing was circled.
-    private func configure(_ session: AskSession, anchor: CGPoint?) {
-        session.actions = controller
-        controller?.askAnchor = anchor
-        session.onSaved = { [weak self] in self?.controller?.saveAskThreads() }
-    }
-
-    func closeAsk() {
-        askSession?.cancel()
-        // A circled chat that never got an answer isn't worth keeping.
-        if let thread = askSession?.thread, !thread.hasAnswer {
-            controller?.deleteAskThread(thread.id)
-        }
-        askSession = nil
-        setAskMode(false)
-    }
-
-    /// Closes the panel if its chat was deleted from the marker.
-    func askThreadDeleted(_ id: UUID) {
-        guard askSession?.thread?.id == id else { return }
-        askSession?.cancel()
-        askSession = nil
     }
 
     func undo() { controller?.undo() }
@@ -137,6 +70,7 @@ struct NotebookPageScreen: View {
     @State private var pageID: UUID
     @State private var photoItem: PhotosPickerItem?
     @State private var showsKeySettings = false
+    private var pal: Pal { .shared }
 
     init(notebook: Notebook, page: NotebookPage) {
         self.notebook = notebook
@@ -161,24 +95,8 @@ struct NotebookPageScreen: View {
                     .padding(16)
             }
         }
-        .overlay {
-            AskOverlay(
-                session: editor.askSession,
-                isAskMode: editor.isAskMode,
-                showsPal: index != nil,
-                voiceQuestion: editor.voiceQuestion,
-                pageActions: { editor.voiceActions() },
-                pageContext: { editor.voicePageContext() },
-                onSummon: { askClaude() },
-                onSend: { editor.startCompose($0) },
-                onCancelCompose: { editor.setAskMode(false) },
-                onClose: { withAnimation(.snappy) { editor.closeAsk() } }
-            )
-        }
-        .animation(.snappy, value: editor.askSession?.id)
-        .animation(.snappy, value: editor.isAskMode)
         .sheet(isPresented: $showsKeySettings) {
-            SettingsView { editor.setAskMode(true) }
+            SettingsView()
         }
         // Tap the title to rename the page.
         .navigationTitle(index.map { Bindable(pages[$0]).editableTitle } ?? .constant(""))
@@ -203,10 +121,10 @@ struct NotebookPageScreen: View {
                     Label("Text", systemImage: "character.textbox")
                 }
                 .toggleStyle(.button)
-                Toggle(isOn: Binding(get: { editor.isAskMode }, set: { on in
-                    if on { askClaude() } else { editor.setAskMode(false) }
+                Toggle(isOn: Binding(get: { pal.isCircling }, set: { on in
+                    if on, !pal.hasKey { showsKeySettings = true } else { editor.setCircling(on) }
                 })) {
-                    Label("Ask Claude", systemImage: "sparkles")
+                    Label("Circle for Your Study Pal", systemImage: "lasso.badge.sparkles")
                 }
                 .toggleStyle(.button)
                 Button { editor.undo() } label: {
@@ -220,6 +138,16 @@ struct NotebookPageScreen: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { editor.saveNow() }
         }
+        // The study pal went to another page of this notebook.
+        .onChange(of: PalNavigator.shared.request) { _, request in
+            guard let request, request.itemID == notebook.id, let target = request.pageID,
+                  notebook.sortedPages.contains(where: { $0.id == target }) else { return }
+            PalNavigator.shared.done(request)
+            guard target != pageID else { return }
+            editor.leaveCurrentPage()
+            notebook.currentPageID = target
+            pageID = target
+        }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task {
@@ -232,18 +160,8 @@ struct NotebookPageScreen: View {
         .onDisappear { editor.saveNow() }
     }
 
-    /// Turns on Ask Claude, from the toolbar or the study pal. Without an
-    /// API key, asks for one first.
-    private func askClaude() {
-        if APIKeyStore.hasKey {
-            editor.setAskMode(true)
-        } else {
-            showsKeySettings = true
-        }
-    }
-
     private func addPage(after page: NotebookPage?) {
-        editor.setAskMode(false)
+        editor.setCircling(false)
         editor.leaveCurrentPage()
         let newPage = notebook.addPage(after: page, in: modelContext)
         Thumbnails.writeBlankNotebookThumbnail(id: newPage.id)
@@ -272,8 +190,6 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
         }
         controller.onZoomChanged = { [weak editor] zoom in editor?.zoomScale = zoom }
         controller.onToolPickerFrame = { [weak editor] frame in editor?.toolPickerFrame = frame }
-        controller.onOpenAskThread = { [weak editor] thread in editor?.openAskThread(thread) }
-        controller.onDeleteAskThread = { [weak editor] id in editor?.askThreadDeleted(id) }
         editor.controller = controller
         return controller
     }

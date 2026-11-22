@@ -92,18 +92,19 @@ final class NotebookCanvasController: UIViewController {
     var onToolPickerFrame: ((CGRect) -> Void)?
     /// Whether the pen palette shows. Off while the toolbars are hidden.
     var showsToolPicker = true
-    /// Opens an Ask Claude chat: a new one right after circling, or a saved
-    /// one when its marker is tapped.
-    var onOpenAskThread: ((AskThread) -> Void)?
-    /// A saved chat was deleted from its marker.
-    var onDeleteAskThread: ((UUID) -> Void)?
+    /// This open page, for the study pal.
+    let palPageID = UUID()
+    /// Circle something for the study pal.
     private let askLasso = AskLassoView()
-    private var askMarkers: [UUID: AskMarkerButton] = [:]
-    /// Where things Claude added in this chat went, so the next one goes
-    /// somewhere else, even before their views are laid out.
-    private var askPlaced: [CGRect] = []
-    /// The top-right corner of the circled area of the chat that's open, if any.
-    var askAnchor: CGPoint? { didSet { askPlaced = [] } }
+    /// Where things the study pal added beside the same circled area went,
+    /// so the next one goes somewhere else, even before it's laid out.
+    private var palPlaced: [CGRect] = []
+    private var palPlacedNear: CGRect?
+    /// Goes up when the page scrolls or zooms to somewhere new, so she
+    /// knows to take a fresh look.
+    private var viewportVersion = 0
+    /// The handwritten words she was last shown, so she can erase or move them.
+    private let palHandwriting = PalHandwriting()
 
     private let canvasView = NotebookCanvasView()
     private let dotGrid = DotGridView()
@@ -217,15 +218,12 @@ final class NotebookCanvasController: UIViewController {
 
         askLasso.frame = view.bounds
         askLasso.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        askLasso.onSelection = { [weak self] rect in self?.finishAsk(in: rect) }
+        askLasso.onSelection = { [weak self] rect in self?.finishCircle(in: rect) }
         view.addSubview(askLasso)
 
         images.showAll()
         for box in page.textBoxes ?? [] where !box.isDeleted {
             textBoxes.showView(for: box)
-        }
-        for thread in page.askThreads ?? [] where !thread.isDeleted {
-            showAskMarker(for: thread)
         }
 
         // Set after loading, so loading doesn't count as an edit.
@@ -290,6 +288,7 @@ final class NotebookCanvasController: UIViewController {
         super.viewDidAppear(animated)
         canvasView.becomeFirstResponder()
         windowUndoManager = canvasView.undoManager
+        if !isLeaving { PalWorkspace.shared.register(self) }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -302,6 +301,7 @@ final class NotebookCanvasController: UIViewController {
     /// this page's canvas and boxes.
     func prepareToLeave() {
         isLeaving = true
+        PalWorkspace.shared.unregister(self)
         view.endEditing(true)
         saveNow()
         clearUndo()
@@ -311,6 +311,8 @@ final class NotebookCanvasController: UIViewController {
     /// going back to the grid, or closing the window.
     func tearDown() {
         isLeaving = true
+        PalWorkspace.shared.unregister(self)
+        if askLasso.isActive { Pal.shared.stopCircling() }
         view.endEditing(true)
         images.deselect()
         saveNow()
@@ -427,8 +429,8 @@ final class NotebookCanvasController: UIViewController {
         return !images.hasImage(at: gesture.location(in: imageLayer))
     }
 
-    /// The Ask tool: circle something on the page to ask Claude about it.
-    func setAskMode(_ on: Bool) {
+    /// Circling for the study pal: the next loop drawn on the page goes to her.
+    private func setCircling(_ on: Bool) {
         if on {
             images.deselect()
             view.endEditing(true)
@@ -436,74 +438,21 @@ final class NotebookCanvasController: UIViewController {
         askLasso.isActive = on
     }
 
-    /// Saves a new chat for the circled area, puts its marker on the page
-    /// and opens it.
-    private func finishAsk(in rect: CGRect) {
-        guard let image = askLasso.snapshot(of: view, rect: rect) else { return }
+    /// A loop was drawn: what's inside it goes to the study pal.
+    private func finishCircle(in rect: CGRect) {
         askLasso.isActive = false
-        let anchor = view.convert(CGPoint(x: rect.maxX, y: rect.minY), to: textLayer)
-        let thread = AskThread(anchor: anchor, imageData: image.jpegData(compressionQuality: 0.85))
-        modelContext.insert(thread)
-        thread.notebookPage = page
-        try? modelContext.save()
-        showAskMarker(for: thread)
-        askPlaced = []
-        onOpenAskThread?(thread)
-    }
-
-    private func showAskMarker(for thread: AskThread) {
-        guard askMarkers[thread.id] == nil else { return }
-        let id = thread.id
-        let marker = AskMarkerButton(
-            threadID: id,
-            onOpen: { [weak self] in self?.openAskThread(id) },
-            onDelete: { [weak self] in self?.deleteAskThread(id) },
-            onMove: { [weak self] anchor in self?.moveAskThread(id, to: anchor) }
-        )
-        marker.place(at: thread.anchor)
-        textLayer.addSubview(marker)
-        askMarkers[id] = marker
-    }
-
-    /// A marker was dragged somewhere else.
-    private func moveAskThread(_ id: UUID, to anchor: CGPoint) {
-        guard let thread = page.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
-        thread.anchorX = anchor.x
-        thread.anchorY = anchor.y
-        saveAskThreads()
-    }
-
-    private func openAskThread(_ id: UUID) {
-        guard let thread = page.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
-        askPlaced = []
-        onOpenAskThread?(thread)
-    }
-
-    /// Removes a saved chat and its marker.
-    func deleteAskThread(_ id: UUID) {
-        askMarkers.removeValue(forKey: id)?.removeFromSuperview()
-        if let thread = page.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) {
-            modelContext.delete(thread)
-            try? modelContext.save()
+        guard let image = askLasso.snapshot(of: view, rect: rect),
+              let jpeg = image.jpegData(compressionQuality: 0.85) else {
+            Pal.shared.stopCircling()
+            return
         }
-        onDeleteAskThread?(id)
+        let area = view.convert(rect, to: textLayer)
+        Pal.shared.circled(PalCircle(pageID: palPageID, pageIndex: nil, rect: area, image: jpeg))
     }
 
-    func saveAskThreads() {
-        guard isModelAlive else { return }
-        try? modelContext.save()
-    }
-
-    /// Everything on the page, for Claude: a picture of the whole page and its typed text.
-    func askPageContext() -> PageContext {
-        let boxes = textBoxes.allViews.map { (frame: $0.frame, text: $0.textView.attributedText ?? NSAttributedString()) }
-        let picture = Thumbnails.renderPageForAsk(drawing: canvasView.drawing, textBoxes: boxes, images: images.thumbnailImages)
-        let text = (page.textBoxes ?? [])
-            .filter { !$0.isDeleted && !$0.plainText.isEmpty }
-            .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
-            .map(\.plainText)
-            .joined(separator: "\n\n")
-        return PageContext(imageData: picture?.jpegData(compressionQuality: 0.8), text: text)
+    /// The part of the page on screen, in page points.
+    private var visibleArea: CGRect {
+        canvasView.convert(canvasView.bounds, to: textLayer)
     }
 
     /// The middle of the screen, in canvas points.
@@ -554,7 +503,7 @@ final class NotebookCanvasController: UIViewController {
         page.modelContext != nil && !page.isDeleted
     }
 
-    /// Goes up with every change to the page, for `askPageVersion`.
+    /// Goes up with every change to the page, for `palVersion`.
     private var contentVersion = 0
 
     private func scheduleSave() {
@@ -641,6 +590,7 @@ final class NotebookCanvasController: UIViewController {
         guard isModelAlive, didRestoreViewport, canvasView.window != nil,
               canvasView.bounds.width > 0, canvasView.bounds.height > 0 else { return }
         page.viewport = currentViewport()
+        viewportVersion += 1
         try? modelContext.save()
     }
 
@@ -803,15 +753,74 @@ extension NotebookCanvasController: UIEditMenuInteractionDelegate {
     }
 }
 
-// MARK: - Claude, the study pal
+// MARK: - The study pal
 
-extension NotebookCanvasController: AskPageActions {
-    var askPageVersion: Int { contentVersion }
+extension NotebookCanvasController: PalPage {
+    var palItemID: UUID { page.notebook?.id ?? page.id }
+    var palKind: PalPageKind { .notebook }
+    var palItemTitle: String { page.notebook?.title ?? "Untitled Notebook" }
 
+    var palWhere: String {
+        let count = page.notebook?.sortedPages.count ?? 1
+        return "page “\(page.displayTitle(number: page.number))” (\(page.number) of \(count))"
+    }
+
+    var palVersion: Int { contentVersion &* 10_000 &+ viewportVersion }
+    var palWindow: UIWindow? { view.window }
     var canAddImages: Bool { true }
 
-    func askPageItems() -> String {
-        let visible = canvasView.convert(canvasView.bounds, to: textLayer)
+    private var textBoxSnapshots: [(frame: CGRect, text: NSAttributedString)] {
+        textBoxes.allViews.map { (frame: $0.frame, text: $0.textView.attributedText ?? NSAttributedString()) }
+    }
+
+    func palSnapshot() -> PalSnapshot {
+        let area = visibleArea
+        let hasContent = contentBounds()?.intersects(area) ?? false
+        let picture = hasContent
+            ? PalRender.notebook(area: area, drawing: canvasView.drawing, textBoxes: textBoxSnapshots, images: images.thumbnailImages)
+            : nil
+        return PalSnapshot(image: picture?.image, area: area, imageSize: picture?.size ?? .zero, text: palNotes(pageIndex: nil), selection: nil)
+    }
+
+    func palLook(at area: CGRect?, pageIndex: Int?, labelHandwriting: Bool) -> (image: Data, area: CGRect)? {
+        guard let area = area ?? contentBounds()?.insetBy(dx: -24, dy: -24) else { return nil }
+        let labels = labelHandwriting ? palHandwriting.list(canvasView.drawing, within: area) : []
+        guard let picture = PalRender.notebook(area: area, drawing: canvasView.drawing, textBoxes: textBoxSnapshots, images: images.thumbnailImages, labels: labels) else { return nil }
+        return (picture.image, area)
+    }
+
+    func palStartCircling() { setCircling(true) }
+    func palStopCircling() { setCircling(false) }
+
+    func palEraseHandwriting(ids: [String], region: CGRect?, pageIndex: Int?) -> (result: String, isError: Bool) {
+        palHandwriting.erase(ids: ids, region: region, on: canvasView)
+    }
+
+    func palMoveHandwriting(ids: [String], to origin: CGPoint, pageIndex: Int?) -> (result: String, isError: Bool) {
+        palHandwriting.move(ids: ids, to: origin, on: canvasView)
+    }
+
+    func palShowArea(_ area: CGRect?, pageIndex: Int?) -> String? {
+        guard let area else {
+            zoomToFit()
+            return nil
+        }
+        let padded = area.insetBy(dx: -max(area.width * 0.1, 30), dy: -max(area.height * 0.1, 30))
+        let size = canvasView.bounds.size
+        let scale = min(size.width / max(padded.width, 1), size.height / max(padded.height, 1))
+        zoom(around: CGPoint(x: padded.midX, y: padded.midY), scale: min(max(scale, canvasView.minimumZoomScale), canvasView.maximumZoomScale))
+        return nil
+    }
+
+    func palUndo() -> Bool { undo() }
+    func palRedo() -> Bool { redo() }
+
+    func palRemoveHighlights(_ text: String, pageIndex: Int?) -> String? {
+        "Notebook pages have no PDF highlights. To remove highlighter ink, use erase_handwriting with a region."
+    }
+
+    func palItems(pageIndex: Int?) -> String {
+        let visible = visibleArea
         var items: [[String: Any]] = (page.textBoxes ?? []).filter { !$0.isDeleted }.map { box in
             [
                 "id": box.id.uuidString,
@@ -824,22 +833,25 @@ extension NotebookCanvasController: AskPageActions {
             ] as [String: Any]
         }
         items += images.describeImages()
-        var description: [String: Any] = [
+        // The handwriting around the screen, word by word.
+        let words = palHandwriting.list(canvasView.drawing, within: visible.insetBy(dx: -visible.width / 2, dy: -visible.height / 2))
+        let ink: [[String: Any]] = words.map { word in
+            ["id": word.id, "line": word.line, "x": word.rect.minX.rounded(), "y": word.rect.minY.rounded(), "width": word.rect.width.rounded(), "height": word.rect.height.rounded()]
+        }
+        let description: [String: Any] = [
             "coordinates": "Page points. x grows to the right, y grows down.",
             "visible_area": [
                 "x": visible.minX.rounded(), "y": visible.minY.rounded(),
                 "width": visible.width.rounded(), "height": visible.height.rounded(),
             ],
             "items": items,
-            "note": "Handwritten ink isn't listed and can't be moved or changed.",
+            "handwriting": ink,
+            "note": "Handwriting is listed word by word (around the screen) with ids for erase_handwriting and move_handwriting. To see which word is which, use look_at with label_handwriting.",
         ]
-        if let askAnchor {
-            description["circled_area_top_right"] = ["x": askAnchor.x.rounded(), "y": askAnchor.y.rounded()]
-        }
-        return askJSON(description)
+        return PalJSON.string(description)
     }
 
-    func askPageNotes() -> String {
+    func palNotes(pageIndex: Int?) -> String {
         (page.textBoxes ?? [])
             .filter { !$0.isDeleted && !$0.plainText.isEmpty }
             .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
@@ -847,7 +859,7 @@ extension NotebookCanvasController: AskPageActions {
             .joined(separator: "\n\n")
     }
 
-    func askAddText(_ text: String) -> UUID? {
+    func palAddText(_ text: String, at origin: CGPoint?, in place: PalPlace) -> UUID? {
         let style = pageTextStyle()
         let measured = (text as NSString).boundingRect(
             with: CGSize(width: style.width - 16, height: .greatestFiniteMagnitude),
@@ -855,11 +867,49 @@ extension NotebookCanvasController: AskPageActions {
             attributes: [.font: style.font],
             context: nil
         )
-        let origin = freeSpot(for: CGSize(width: style.width, height: ceil(measured.height) + 24))
-        return textBoxes.insertBox(at: origin, width: style.width, text: text, font: style.font, color: style.color)
+        let size = CGSize(width: style.width, height: ceil(measured.height) + 24)
+        let spot = origin ?? freeSpot(for: size, near: place.near)
+        return textBoxes.insertBox(at: spot, width: style.width, text: text, font: style.font, color: style.color)
     }
 
-    /// How typed text looks on this page, so what Claude writes matches it:
+    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
+        let visible = visibleArea
+        // Without handwriting to match, a size that reads well on screen.
+        let style = PalInkReading.style(of: canvasView.drawing, fallbackHeight: 20 / max(canvasView.zoomScale, 0.05))
+        let height = min(max(letterHeight ?? style.letterHeight, 6), 200)
+        let maxWidth = max(min(visible.width * 0.45, height * 40), height * 10)
+        let size = PalInk.measure(text, letterHeight: height, maxWidth: maxWidth)
+        let spot = origin ?? freeSpot(for: CGSize(width: size.width + 8, height: size.height + 8), near: place.near)
+        let writing = PalInk.handwriting(
+            text,
+            origin: spot,
+            letterHeight: height,
+            maxWidth: maxWidth,
+            color: color ?? style.color,
+            penWidth: style.penWidth * height / max(style.letterHeight, 1),
+            seed: UInt64.random(in: 1...UInt64.max)
+        )
+        guard !writing.strokes.isEmpty else { return ("There was nothing to write.", true) }
+        PalInkEditing.add(writing.strokes, to: canvasView, actionName: "Writing")
+        let box = writing.bounds
+        return ("Wrote it by hand at x \(Int(box.minX)), y \(Int(box.minY)), width \(Int(box.width)), height \(Int(box.height)).", false)
+    }
+
+    func palMark(_ mark: PalInk.Mark, around rect: CGRect, to: CGPoint?, color: UIColor?, in place: PalPlace) -> String? {
+        let style = PalInkReading.style(of: canvasView.drawing, fallbackHeight: 20 / max(canvasView.zoomScale, 0.05))
+        let strokes = PalInk.mark(mark, around: rect, to: to, color: color ?? PalColor.red, penWidth: max(style.penWidth, 2), seed: UInt64.random(in: 1...UInt64.max))
+        guard !strokes.isEmpty else { return "Couldn't draw that mark." }
+        PalInkEditing.add(strokes, to: canvasView, actionName: "Mark")
+        return nil
+    }
+
+    func palReadPages(_ pages: ClosedRange<Int>) -> String? { nil }
+
+    func palHighlight(_ text: String, pageIndex: Int?, color: HighlightColor) -> String? {
+        "Highlighting works on PDFs. On a notebook page, use mark to underline or circle it."
+    }
+
+    /// How typed text looks on this page, so what the study pal writes matches it:
     /// the font, color and width most of its text boxes use. With no typed
     /// text yet, the color most of the handwriting is in.
     private func pageTextStyle() -> (font: UIFont, color: UIColor, width: CGFloat) {
@@ -906,55 +956,34 @@ extension NotebookCanvasController: AskPageActions {
         return 0.2126 * red + 0.7152 * green + 0.0722 * blue
     }
 
-    func askAddImage(_ image: PreparedImage) -> UUID? {
+    func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID? {
         let size = CanvasImageCoordinator.defaultSize(of: image)
-        let origin = freeSpot(for: size)
+        let origin = freeSpot(for: size, near: place.near)
         return images.add(image, centeredAt: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2))
     }
 
-    /// Where to put something new from Claude, as its top-left corner: a
-    /// free spot that covers no ink, text or image.
+    /// Where to put something new from the study pal, as its top-left
+    /// corner: a free spot that covers no ink, text or image.
     /// - With an area circled: as close as it can to just right of it.
     /// - Otherwise: as close as it can to the middle of the screen.
-    /// Spots on screen win over closer ones off it.
-    private func freeSpot(for size: CGSize) -> CGPoint {
-        let visible = canvasView.convert(canvasView.bounds, to: textLayer)
+    private func freeSpot(for size: CGSize, near: CGRect?) -> CGPoint {
+        if near != palPlacedNear {
+            palPlacedNear = near
+            palPlaced = []
+        }
+        let visible = visibleArea
         var taken = canvasView.drawing.strokes.map(\.renderBounds)
         taken += textBoxes.allViews.map(\.frame)
         taken += (page.images ?? []).filter { !$0.isDeleted }.map(\.frame)
-        taken += askPlaced
-        let blocked = taken.filter { !$0.isNull && !$0.isEmpty }.map { $0.insetBy(dx: -20, dy: -20) }
-
-        let preferred = askAnchor.map { CGPoint(x: $0.x + 24, y: $0.y) }
+        taken += palPlaced
+        let preferred = near.map { CGPoint(x: $0.maxX + 20, y: $0.minY) }
             ?? CGPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2)
-        let onScreen = visible.insetBy(dx: 12, dy: 12)
-
-        // Spots on a grid around the preferred one, up to a screen and a
-        // half away, cheapest first.
-        let step = max(24, max(visible.width, visible.height) / 60)
-        let reach = Int((max(visible.width, visible.height) * 1.5 / step).rounded(.up))
-        var candidates: [(origin: CGPoint, cost: CGFloat)] = []
-        candidates.reserveCapacity((2 * reach + 1) * (2 * reach + 1))
-        for row in -reach...reach {
-            for column in -reach...reach {
-                let origin = CGPoint(x: preferred.x + CGFloat(column) * step, y: preferred.y + CGFloat(row) * step)
-                var cost = hypot(origin.x - preferred.x, origin.y - preferred.y)
-                if !onScreen.contains(CGRect(origin: origin, size: size)) { cost += 1_500 }
-                candidates.append((origin, cost))
-            }
-        }
-        candidates.sort { $0.cost < $1.cost }
-        let spot = candidates.first { candidate in
-            let frame = CGRect(origin: candidate.origin, size: size)
-            return !blocked.contains { $0.intersects(frame) }
-        }?.origin
-            // Everything nearby is full: below it all.
-            ?? CGPoint(x: preferred.x, y: (contentBounds()?.maxY ?? preferred.y) + 40)
-        askPlaced.append(CGRect(origin: spot, size: size))
+        let spot = PalSpot.find(for: size, preferred: preferred, visible: visible, taken: taken, below: contentBounds()?.maxY ?? preferred.y)
+        palPlaced.append(CGRect(origin: spot, size: size))
         return spot
     }
 
-    func askMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
+    func palMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
         change(id) { kind in
             switch kind {
             case .text: _ = self.textBoxes.setBoxFrame(id: id, origin: origin)
@@ -963,7 +992,7 @@ extension NotebookCanvasController: AskPageActions {
         }
     }
 
-    func askResizeItem(_ id: UUID, width: CGFloat) -> String? {
+    func palResizeItem(_ id: UUID, width: CGFloat) -> String? {
         change(id) { kind in
             switch kind {
             case .text: _ = self.textBoxes.setBoxFrame(id: id, width: width)
@@ -972,7 +1001,7 @@ extension NotebookCanvasController: AskPageActions {
         }
     }
 
-    func askEditText(_ id: UUID, text: String) -> String? {
+    func palEditText(_ id: UUID, text: String) -> String? {
         guard textBoxes.box(id) != nil else {
             return images.hasImage(id) ? "Images can't be edited, only moved, resized or deleted." : Self.unknownItem
         }
@@ -980,7 +1009,7 @@ extension NotebookCanvasController: AskPageActions {
         return nil
     }
 
-    func askDeleteItem(_ id: UUID) -> String? {
+    func palDeleteItem(_ id: UUID) -> String? {
         if textBoxes.box(id) != nil {
             textBoxes.removeBox(id: id, undoable: true)
             return nil
@@ -989,7 +1018,7 @@ extension NotebookCanvasController: AskPageActions {
     }
 
     private enum ItemKind { case text, image }
-    private static let unknownItem = "No item with that id. Call get_page_items for the current ids."
+    private static let unknownItem = "No typed note or picture with that id on this page. Call get_page_items for the current ids."
 
     /// Runs a change on a text box or an unlocked image, animated so you can
     /// see what moved. Returns nil, or why it couldn't.

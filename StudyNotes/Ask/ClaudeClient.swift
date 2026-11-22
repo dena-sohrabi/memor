@@ -13,14 +13,16 @@ import Foundation
 ///   included in error messages.
 @MainActor
 enum ClaudeClient {
+    /// The study pal's mind, when it's Claude.
     static let model = "claude-opus-5-5"
-    /// For chats you start by talking to the study pal: listed as fast,
-    /// against Opus's moderate, and it can answer without thinking first.
-    static let voiceModel = "claude-sonnet-5-5"
+    /// Quick, cheap jobs in the background (her memory).
+    static let choresModel = "claude-haiku-5-5"
     private static let apiVersion = "2026-10-21"
-    /// Opt-in server-side fallback: if a safety classifier declines, the API
-    /// retries on a fallback model within the same request.
-    private static let fallbackBeta = "server-side-fallback-2026-07-01"
+    /// Opt-in server-side fallback (if a safety classifier declines, the API
+    /// retries on a fallback model within the same request), and the
+    /// controls that let a reply's thinking be dropped rather than fail the
+    /// request if the history ever doesn't match.
+    private static let betas = "server-side-fallback-2026-07-01,thinking-binding-controls-2026-08-01"
     private static let messagesURL = URL(string: "https://api.anthropic.com/v1/messages")!
     private static let modelsURL = URL(string: "https://api.anthropic.com/v1/models")!
 
@@ -56,7 +58,7 @@ enum ClaudeClient {
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
-        request.setValue(fallbackBeta, forHTTPHeaderField: "anthropic-beta")
+        request.setValue(betas, forHTTPHeaderField: "anthropic-beta")
 
         let (bytes, response) = try await perform { try await session.bytes(for: request) }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -65,17 +67,26 @@ enum ClaudeClient {
             for try await byte in bytes { data.append(byte) }
             throw ClaudeError(status: status, body: data)
         }
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            guard line.hasPrefix("data:") else { continue }
-            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-            guard let data = payload.data(using: .utf8),
-                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            if event["type"] as? String == "error" {
-                throw ClaudeError(eventError: event["error"] as? [String: Any])
+        // Stopping in the middle is a cancellation, not a network error.
+        try await perform {
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard let data = payload.data(using: .utf8),
+                      let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                if event["type"] as? String == "error" {
+                    throw ClaudeError(eventError: event["error"] as? [String: Any])
+                }
+                onEvent(event)
             }
-            onEvent(event)
         }
+    }
+
+    static func stream(body: [String: Any], onEvent: ([String: Any]) -> Void) async throws {
+        var body = body
+        body["stream"] = true
+        try await stream(body: JSONSerialization.data(withJSONObject: body), onEvent: onEvent)
     }
 
     /// Turns network failures into a readable error.

@@ -1,15 +1,23 @@
 import Foundation
 
-/// Talks to OpenAI straight from the iPad, with the user's own key, for
-/// two things: the study pal's speaking voice and the images Claude draws.
-/// Claude stays the one who thinks and answers; OpenAI only speaks Claude's
-/// words and draws what Claude describes.
+/// Talks to OpenAI straight from the iPad, with the user's own key. There
+/// is no Memor server in between. OpenAI does everything for the study pal:
+/// - her mind: GPT-6.2 Sol, through the Responses API (`streamResponse`);
+/// - small chores, like writing down what she remembers: GPT-6 Luna;
+/// - her speaking voice: the realtime model, reading out what she wrote;
+/// - the pictures she draws.
 ///
-/// Locked down like `ClaudeClient`: an ephemeral session (no cache, cookies
-/// or stored credentials), no redirects, TLS 1.2 or newer, and the key read
-/// from the Keychain per request and never logged.
+/// Raw HTTP, locked down so the key can't end up anywhere but
+/// api.openai.com: an ephemeral session (no cache, cookies or stored
+/// credentials), no redirects, TLS 1.2 or newer, and the key read from the
+/// Keychain per request and never logged.
 @MainActor
 enum OpenAIClient {
+    /// Her mind: OpenAI's go-to model for agents, which reads pages and
+    /// handwriting and uses many tools well.
+    static let brainModel = "gpt-6.2-sol"
+    /// Quick, cheap jobs in the background (her memory).
+    static let choresModel = "gpt-6-luna"
     /// Speaks text it's given (the replacement OpenAI names for its old
     /// text-to-speech models).
     static let voiceModel = "gpt-realtime-2.1-mini"
@@ -18,6 +26,7 @@ enum OpenAIClient {
 
     private static let modelsURL = URL(string: "https://api.openai.com/v1/models")!
     private static let imagesURL = URL(string: "https://api.openai.com/v1/images/generations")!
+    private static let responsesURL = URL(string: "https://api.openai.com/v1/responses")!
 
     private static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
@@ -80,60 +89,69 @@ enum OpenAIClient {
         return session.webSocketTask(with: request)
     }
 
-    /// A short, text-only request to the realtime model on a connection of
-    /// its own, like writing down what the study pal remembers after a call.
-    @MainActor
-    static func writeText(instructions: String, input: String) async throws -> String {
-        let socket = try voiceSocket()
-        socket.resume()
-        // Never wait forever.
-        let timeout = Task {
-            try? await Task.sleep(for: .seconds(45))
-            socket.cancel(with: .goingAway, reason: nil)
+    // MARK: Responses
+
+    /// Sends a Responses request with `stream: true` and hands each server
+    /// event (a parsed JSON object) to `onEvent` as it arrives. A failed or
+    /// errored response throws.
+    static func streamResponse(body: [String: Any], onEvent: ([String: Any]) -> Void) async throws {
+        var body = body
+        body["stream"] = true
+        let request = try responsesRequest(body: body)
+        let (bytes, response) = try await perform { try await session.bytes(for: request) }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            var data = Data()
+            for try await byte in bytes { data.append(byte) }
+            throw OpenAIError(status: status, body: data)
         }
-        defer {
-            timeout.cancel()
-            socket.cancel(with: .normalClosure, reason: nil)
-        }
-        let session: [String: Any] = ["type": "realtime", "output_modalities": ["text"], "instructions": instructions]
-        let item: [String: Any] = ["type": "message", "role": "user", "content": [["type": "input_text", "text": input]]]
-        let events: [[String: Any]] = [
-            ["type": "session.update", "session": session],
-            ["type": "conversation.item.create", "item": item],
-            ["type": "response.create"],
-        ]
-        for event in events {
-            let data = try JSONSerialization.data(withJSONObject: event)
-            try await socket.send(.string(String(decoding: data, as: UTF8.self)))
-        }
-        var text = ""
-        while true {
-            let message = try await socket.receive()
-            guard case .string(let raw) = message,
-                  let event = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any] else { continue }
-            switch event["type"] as? String {
-            case "response.output_text.delta", "response.text.delta":
-                text += event["delta"] as? String ?? ""
-            case "response.done":
-                let response = event["response"] as? [String: Any]
-                if text.isEmpty { text = outputText(of: response) }
-                if text.isEmpty,
-                   let details = response?["status_details"] as? [String: Any],
-                   let error = details["error"] as? [String: Any] {
+        // Stopping in the middle is a cancellation, not a network error.
+        try await perform {
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                guard line.hasPrefix("data:") else { continue }
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                guard payload != "[DONE]",
+                      let data = payload.data(using: .utf8),
+                      let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                switch event["type"] as? String {
+                case "error":
+                    let error = event["error"] as? [String: Any] ?? event
                     throw OpenAIError(status: 0, message: error["message"] as? String ?? "", code: error["code"] as? String)
+                case "response.failed":
+                    let error = (event["response"] as? [String: Any])?["error"] as? [String: Any]
+                    throw OpenAIError(status: 0, message: error?["message"] as? String ?? "", code: error?["code"] as? String)
+                default:
+                    onEvent(event)
                 }
-                return text
-            case "error":
-                let error = event["error"] as? [String: Any]
-                throw OpenAIError(status: 0, message: error?["message"] as? String ?? "", code: error?["code"] as? String)
-            default:
-                continue
             }
         }
     }
 
-    /// The text of a finished realtime response: what it wrote, or the
-    /// transcript of what it said.
+    /// A short request that isn't streamed, for chores in the background.
+    /// Returns the text it wrote.
+    static func respond(body: [String: Any]) async throws -> String {
+        var body = body
+        body["stream"] = false
+        let request = try responsesRequest(body: body)
+        let (data, response) = try await perform { try await session.data(for: request) }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw OpenAIError(status: status, body: data) }
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return outputText(of: json)
+    }
+
+    private static func responsesRequest(body: [String: Any]) throws -> URLRequest {
+        guard let key = OpenAIKeyStore.read() else { throw OpenAIError.noKey }
+        var request = URLRequest(url: responsesURL)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    /// The text of a finished response: the text parts of its messages.
     static func outputText(of response: [String: Any]?) -> String {
         var pieces: [String] = []
         let items = response?["output"] as? [[String: Any]] ?? []
@@ -147,7 +165,7 @@ enum OpenAIClient {
                 }
             }
         }
-        return pieces.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        return pieces.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Turns network failures into a readable error.
@@ -183,6 +201,8 @@ enum OpenAIError: LocalizedError {
     case needsVerification
     case noCredits
     case rateLimited
+    /// The talk grew longer than the model can read at once.
+    case tooLong
     case network(String)
     case other(String)
 
@@ -194,6 +214,8 @@ enum OpenAIError: LocalizedError {
     init(status: Int, message: String, code: String?) {
         if status == 401 || code == "invalid_api_key" {
             self = .invalidKey
+        } else if code == "context_length_exceeded" {
+            self = .tooLong
         } else if message.localizedCaseInsensitiveContains("verif") {
             self = .needsVerification
         } else if code == "insufficient_quota" || message.localizedCaseInsensitiveContains("quota")
@@ -213,6 +235,7 @@ enum OpenAIError: LocalizedError {
         case .needsVerification: "OpenAI needs your organization verified before it draws images. Do it at platform.openai.com → Settings → Organization."
         case .noCredits: "Your OpenAI account is out of credits. Add some at platform.openai.com → Billing."
         case .rateLimited: "OpenAI is getting too many requests right now. Wait a moment and try again."
+        case .tooLong: "We've talked so much that I lost track. Tap New Topic and ask me again."
         case .network(let description): "Couldn't reach OpenAI: \(description)"
         case .other(let message): message
         }

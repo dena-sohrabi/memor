@@ -2,12 +2,13 @@ import AVFAudio
 import Foundation
 import Speech
 
-/// Listens when you tap the study pal, and turns what you say into text.
-/// Recognition runs on the iPad, so your voice never leaves it; only the
-/// text goes to Claude, as your question.
+/// Turns what you say to the study pal into text, for voice messages.
+/// Recognition runs on the iPad, in English, so your voice never leaves
+/// it; only the text goes to her.
 ///
-/// She stops listening on her own a moment after you stop talking, or
-/// when you tap her again.
+/// Two ways to talk: hold the mic button while you speak and let go to
+/// send (`start(holding: true)`, then `release()`), or tap it, speak, and
+/// tap it again (`stop()`). Either way, a pause doesn't cut you off.
 @MainActor
 @Observable
 final class StudyPalListener {
@@ -42,38 +43,40 @@ final class StudyPalListener {
         return nil
     }
 
+    /// Called with what you said, once you're done.
+    @ObservationIgnored var onHeard: ((String) -> Void)?
+
     @ObservationIgnored private var capture: SpeechCapture?
     @ObservationIgnored private var silenceTask: Task<Void, Never>?
     /// Bumped each time listening starts or stops, so late results from an
     /// earlier time don't count.
     @ObservationIgnored private var generation = 0
+    /// You let go (or tapped again): the last words are being worked out.
+    @ObservationIgnored private var isReleasing = false
+    /// Let go before the microphone was even on.
+    @ObservationIgnored private var releaseWhenReady = false
 
-    /// How long a pause ends what you're saying. Recognition adds full
-    /// stops early, even mid-thought, so they don't count as the end.
-    private static let pause: Duration = .milliseconds(1_500)
-    /// After a clear question.
-    private static let questionPause: Duration = .seconds(1)
-    /// When you trail off on a word that leads somewhere ("and", "so",
-    /// "um"), you're probably not done.
-    private static let midThoughtPause: Duration = .milliseconds(2_400)
-    private static let leadingWords: Set<String> = [
-        "and", "but", "so", "or", "because", "um", "uh", "like", "the", "a", "an", "to", "of",
-        "with", "then", "if", "that", "which", "is", "are", "my", "your", "what", "how", "why", "about",
-    ]
-    private static let longest: Duration = .seconds(45)
+    /// How long she waits for the last words after you let go.
+    private static let lastWords: Duration = .milliseconds(1_200)
+    /// A tap with nothing said, after this long, is given up on.
+    private static let patience: Duration = .seconds(12)
+    private static let longest: Duration = .seconds(120)
 
-    /// Goes up each time she stops listening because you said nothing.
+    /// Goes up each time listening ends because you said nothing.
     private(set) var silences = 0
 
-    /// Starts listening, waiting up to `patience` for you to start talking.
-    /// Once you stop, what you said becomes `heard`, unless you said
-    /// nothing (then `silences` goes up) or listening was cancelled.
-    func start(patience: Duration = .seconds(7)) {
+    /// Starts listening. Once you `release()` (or `stop()`), what you said
+    /// goes to `heard` and `onHeard`, unless you said nothing (then
+    /// `silences` goes up) or it was cancelled. Tapped on (`holding`
+    /// false), she gives up if you say nothing for a while.
+    func start(holding: Bool = false) {
         guard !isListening else { return }
         generation += 1
         let generation = generation
         transcript = ""
         level = 0
+        isReleasing = false
+        releaseWhenReady = false
         state = .starting
         Task {
             let problem = await SpeechCapture.prepare()
@@ -93,7 +96,11 @@ final class StudyPalListener {
             }
             self.capture = capture
             state = .listening
-            wait(patience, generation: generation)
+            if releaseWhenReady {
+                release()
+            } else if !holding {
+                wait(Self.patience, generation: generation)
+            }
             Task {
                 try? await Task.sleep(for: Self.longest)
                 if self.generation == generation { finish() }
@@ -110,9 +117,29 @@ final class StudyPalListener {
         }
     }
 
-    /// Stops now and sends what you said so far.
+    /// You're done: she works out your last words, then sends it all.
+    func release() {
+        guard isListening, !isReleasing else { return }
+        guard state == .listening, let capture else {
+            // The microphone isn't on yet; send once it is.
+            releaseWhenReady = true
+            return
+        }
+        isReleasing = true
+        capture.finishAudio()
+        wait(Self.lastWords, generation: generation)
+    }
+
+    /// The same as letting go, for a tap.
     func stop() {
-        finish()
+        release()
+    }
+
+    /// What started as a hold was a tap: from now on she gives up if you
+    /// say nothing for a while.
+    func becameTap() {
+        guard isListening, !isReleasing else { return }
+        wait(Self.patience, generation: generation)
     }
 
     /// Stops without sending anything.
@@ -123,27 +150,20 @@ final class StudyPalListener {
         capture = nil
         transcript = ""
         level = 0
+        isReleasing = false
+        releaseWhenReady = false
         state = .idle
     }
 
     private func didHear(_ text: String, isFinal: Bool, generation: Int) {
         guard generation == self.generation, isListening else { return }
         transcript = text
-        if isFinal {
+        if isFinal, isReleasing {
             finish()
-        } else {
-            wait(Self.pause(after: text), generation: generation)
+        } else if !isReleasing, silenceTask != nil {
+            // Tapped on: you're talking, so she keeps listening.
+            wait(Self.patience, generation: generation)
         }
-    }
-
-    /// How long to wait after what's been said so far.
-    private static func pause(after text: String) -> Duration {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lastWord = trimmed.split(separator: " ").last
-            .map { $0.lowercased().trimmingCharacters(in: .punctuationCharacters) } ?? ""
-        if leadingWords.contains(lastWord) || trimmed.hasSuffix("…") { return midThoughtPause }
-        if trimmed.hasSuffix("?") { return questionPause }
-        return pause
     }
 
     private func setLevel(_ level: Float, generation: Int) {
@@ -175,8 +195,11 @@ final class StudyPalListener {
         guard isListening else { return }
         generation += 1
         silenceTask?.cancel()
+        silenceTask = nil
         capture?.stop()
         capture = nil
+        isReleasing = false
+        releaseWhenReady = false
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         level = 0
         state = .idle
@@ -184,6 +207,7 @@ final class StudyPalListener {
             silences += 1
         } else {
             heard = Heard(id: (heard?.id ?? 0) + 1, text: text)
+            onHeard?(text)
         }
     }
 }
@@ -207,6 +231,12 @@ final class SpeechCapture: @unchecked Sendable {
 
     private enum Failure: Error { case unavailable, noMicrophone }
 
+    /// She understands English: your own kind of English if your iPad is
+    /// set to it, otherwise American English.
+    static var locale: Locale {
+        Locale.current.language.languageCode == .english ? Locale.current : Locale(identifier: "en-US")
+    }
+
     /// Holds the request for the audio thread.
     private final class RequestBox: @unchecked Sendable {
         let request: SFSpeechAudioBufferRecognitionRequest
@@ -225,13 +255,12 @@ final class SpeechCapture: @unchecked Sendable {
         guard await AVAudioApplication.requestRecordPermission() else {
             return "The microphone is off for Memor. Turn it on in Settings › Privacy & Security › Microphone, or type instead."
         }
-        guard let recognizer = SFSpeechRecognizer(), recognizer.isAvailable else {
+        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
             return "Speech recognition isn't available right now. Type instead."
         }
         // Your voice stays on the iPad, or it isn't used at all.
         guard recognizer.supportsOnDeviceRecognition else {
-            let language = Locale.current.localizedString(forIdentifier: recognizer.locale.identifier) ?? "your language"
-            return "This iPad can't recognize \(language) on its own, and Memor doesn't send your voice anywhere. Type instead."
+            return "This iPad can't recognize English on its own yet, and Memor doesn't send your voice anywhere. Add English under Settings › General › Keyboard › Dictation Languages, or type instead."
         }
         return nil
     }
@@ -240,14 +269,16 @@ final class SpeechCapture: @unchecked Sendable {
     private var events: AsyncStream<SpeechEvent>.Continuation?
 
     /// Starts the microphone and recognition, sending what's heard, and
-    /// how loud it is, to `events`.
-    func start(events: AsyncStream<SpeechEvent>.Continuation) throws {
+    /// how loud it is, to `events`. `hints` are words it should expect
+    /// (her name). `quietly`: for waiting to hear her name, so other audio
+    /// keeps playing at full volume.
+    func start(events: AsyncStream<SpeechEvent>.Continuation, hints: [String] = [], quietly: Bool = false) throws {
         self.events = events
-        guard let recognizer = SFSpeechRecognizer() else { throw Failure.unavailable }
+        guard let recognizer = SFSpeechRecognizer(locale: Self.locale) else { throw Failure.unavailable }
         let session = AVAudioSession.sharedInstance()
         // The same setup she speaks with, so switching between listening
         // and talking doesn't glitch.
-        try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+        try session.setCategory(.playAndRecord, mode: .default, options: quietly ? [.mixWithOthers, .defaultToSpeaker] : [.duckOthers, .defaultToSpeaker])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
 
         let request = SFSpeechAudioBufferRecognitionRequest()
@@ -255,6 +286,7 @@ final class SpeechCapture: @unchecked Sendable {
         request.requiresOnDeviceRecognition = true
         request.addsPunctuation = true
         request.taskHint = .dictation
+        if !hints.isEmpty { request.contextualStrings = hints }
         self.request = request
 
         let input = engine.inputNode
@@ -277,7 +309,16 @@ final class SpeechCapture: @unchecked Sendable {
         }
     }
 
-    func stop() {
+    /// Stops the microphone, but lets recognition finish the last words.
+    func finishAudio() {
+        if engine.isRunning { engine.stop() }
+        engine.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+    }
+
+    /// Stops listening. `releasingAudio`: lets the audio session go too
+    /// (not when she's about to talk, or her voice would be cut).
+    func stop(releasingAudio: Bool = true) {
         if engine.isRunning { engine.stop() }
         engine.inputNode.removeTap(onBus: 0)
         request?.endAudio()
@@ -286,7 +327,9 @@ final class SpeechCapture: @unchecked Sendable {
         task = nil
         events?.finish()
         events = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        if releasingAudio {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 
     /// How loud a buffer is, 0 (quiet) to 1 (loud).

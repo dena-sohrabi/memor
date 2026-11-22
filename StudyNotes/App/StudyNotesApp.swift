@@ -3,7 +3,14 @@ import SwiftUI
 
 @main
 struct StudyNotesApp: App {
-    private let container = Persistence.makeContainer()
+    private let container: ModelContainer
+
+    init() {
+        container = Persistence.makeContainer()
+        // The study pal searches your notes, and shows her reminders.
+        PalLibrary.container = container
+        _ = Pal.shared
+    }
 
     var body: some Scene {
         // The library. It always presents the same value, so opening it

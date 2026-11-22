@@ -88,6 +88,8 @@ struct LibraryView: View {
                     .allowsHitTesting(false)
             }
         }
+        // The study pal, while this is the window you're using.
+        .overlay { PalOverlay() }
         // "Open in Memor" from Files, Mail or Safari. The system hands
         // over a copy in the Inbox folder, which is removed after importing.
         .onOpenURL { url in

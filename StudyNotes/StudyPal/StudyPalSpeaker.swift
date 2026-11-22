@@ -2,20 +2,17 @@ import AVFAudio
 import Foundation
 import os
 
-/// The study pal's speaking voice, from OpenAI's realtime model.
-/// - In Voice mode it's her, on a call with you (`startConversation`): it
-///   gets your words as text and pictures of your page, answers out loud
-///   and calls her page tools. Each finished reply's words come back as
-///   `lastReply`, so the call can be remembered afterwards.
-/// - It can also read out a text it's given (`begin(answering:)`, `feed`),
-///   as for trying voices out in Settings.
+/// The study pal's speaking voice, from OpenAI's realtime model. It only
+/// reads out what she wrote (`begin(answering:)`, then `feed` as her reply
+/// streams in), starting at the first natural break, so she sounds quick.
+/// It also says short samples, for trying voices out in Settings.
 ///
-/// Tap her to cut her off. Needs an OpenAI key, and Settings can turn it
-/// off (`isEnabledKey`) and pick her voice (`voiceKey`).
+/// Needs an OpenAI key, and Settings can turn it off (`isEnabledKey`) and
+/// pick her voice (`voiceKey`).
 @MainActor
 @Observable
 final class StudyPalSpeaker {
-    /// The setting for speaking answers; on unless turned off.
+    /// The setting for speaking replies to voice messages; on unless turned off.
     nonisolated static let isEnabledKey = "studyPal.speaks"
     /// The setting for which voice she uses.
     nonisolated static let voiceKey = "studyPal.voice"
@@ -52,9 +49,6 @@ final class StudyPalSpeaker {
         like a kind friend sitting next to someone who's studying.
         """
 
-    /// How she sounds when she's the one talking with you.
-    private static let conversationStyle = "Speak softly and warmly, gently and a little playfully, at a relaxed pace."
-
     /// From her first word of an answer until she's said all of it (or
     /// was stopped), pauses between sentences included.
     private(set) var isTalking = false
@@ -62,37 +56,6 @@ final class StudyPalSpeaker {
     private(set) var finishedAnswers = 0
     /// Why she couldn't speak the last answer, if something went wrong.
     private(set) var problem: String?
-
-    // MARK: Conversation state
-
-    /// A tool the model called, waiting to be run.
-    struct FunctionCall: Equatable {
-        let callID: String
-        let name: String
-        let arguments: String
-    }
-
-    /// In a conversation, she's working out what to say (no sound yet).
-    private(set) var isThinking = false
-    /// Tools the model called in its last reply, for the app to run.
-    private(set) var pendingCalls: [FunctionCall] = []
-
-    /// The words of a reply she finished (or was cut off in).
-    struct Reply: Equatable {
-        let id = UUID()
-        let text: String
-    }
-
-    /// Her last reply in a conversation, as text.
-    private(set) var lastReply: Reply?
-    /// What she's said so far in the reply she's on.
-    @ObservationIgnored private var replyText = ""
-    /// A conversation with the realtime model is open: it hears you (as
-    /// text), sees your page and answers you itself.
-    @ObservationIgnored private(set) var isConversing = false
-    @ObservationIgnored private var conversationInstructions = ""
-    @ObservationIgnored private var conversationTools: [[String: Any]] = []
-    @ObservationIgnored private var handledCalls: Set<String> = []
 
     @ObservationIgnored private var socket: URLSessionWebSocketTask?
     @ObservationIgnored private var receiveTask: Task<Void, Never>?
@@ -124,23 +87,17 @@ final class StudyPalSpeaker {
         OpenAIKeyStore.hasKey && (UserDefaults.standard.object(forKey: isEnabledKey) as? Bool ?? true)
     }
 
-    /// Voice or Chat, from the switch beside her ("voice" or "chat").
-    nonisolated static let modeKey = "studyPal.mode"
-
-    /// She can talk, and the switch beside her is on Voice.
-    nonisolated static var isVoiceMode: Bool {
-        isTurnedOn && (UserDefaults.standard.string(forKey: modeKey) ?? "voice") == "voice"
-    }
-
     /// Connects ahead of time (as you start talking), so she can answer the
-    /// moment Claude's first sentence is ready.
+    /// moment her first sentence is ready.
     func warmUp() {
         guard isAvailable else { return }
         connect()
+        // If no answer comes to say, the connection goes again.
+        if !isOnAnswer { closeWhenIdle() }
     }
 
-    /// Gets ready to say the answer to `question`. (While Claude starts,
-    /// she hums; see `StudyPalSceneView`.)
+    /// Gets ready to say her answer to what you just said. (While she
+    /// thinks, she hums; see `StudyPalSceneView`.)
     func begin(answering question: String) {
         stop()
         guard isAvailable else { return }
@@ -154,118 +111,6 @@ final class StudyPalSpeaker {
         loggedFirstAudio = false
         countsAsAnswer = true
         connect()
-    }
-
-    // MARK: Conversation
-
-    /// Starts a fresh conversation in which the realtime model itself is
-    /// the study pal: `instructions` say who she is and what's on the page,
-    /// `tools` what she can do on it, and `pageImage` (JPEG) shows it.
-    func startConversation(instructions: String, tools: [[String: Any]], pageImage: Data?) {
-        stop()
-        disconnect()
-        problem = nil
-        isConversing = true
-        conversationInstructions = instructions
-        conversationTools = tools
-        pendingCalls = []
-        handledCalls = []
-        replyText = ""
-        connect()
-        guard let pageImage else { return }
-        send([
-            "type": "conversation.item.create",
-            "item": [
-                "type": "message",
-                "role": "user",
-                "content": [
-                    ["type": "input_text", "text": "This is my page right now."],
-                    ["type": "input_image", "image_url": "data:image/jpeg;base64," + pageImage.base64EncodedString()],
-                ],
-            ] as [String: Any],
-        ])
-    }
-
-    /// You said (or typed) something: she answers, out loud. `image` (JPEG)
-    /// goes with it, like a part of the page you circled.
-    func say(_ text: String, image: Data? = nil) {
-        guard isConversing else { return }
-        stop()
-        var content: [[String: Any]] = [["type": "input_text", "text": text]]
-        if let image {
-            content.append(["type": "input_image", "image_url": "data:image/jpeg;base64," + image.base64EncodedString()])
-        }
-        send([
-            "type": "conversation.item.create",
-            "item": ["type": "message", "role": "user", "content": content] as [String: Any],
-        ])
-        requestReply()
-    }
-
-    /// A fresh look at the page, which changed since she last saw it: a
-    /// picture and its typed notes, for her to take into account in her
-    /// next reply. (It doesn't ask her to reply.)
-    func showPage(image: Data?, notes: String) {
-        guard isConversing else { return }
-        let typed = notes.trimmingCharacters(in: .whitespacesAndNewlines)
-        var text = "My page changed since you last saw it. This is how it looks now."
-        if !typed.isEmpty { text += " Its typed notes now:\n\n" + String(typed.prefix(6_000)) }
-        var content: [[String: Any]] = [["type": "input_text", "text": text]]
-        if let image {
-            content.append(["type": "input_image", "image_url": "data:image/jpeg;base64," + image.base64EncodedString()])
-        }
-        send([
-            "type": "conversation.item.create",
-            "item": ["type": "message", "role": "user", "content": content] as [String: Any],
-        ])
-    }
-
-    /// The results of the tools she called: she carries on from them.
-    func finishCalls(_ outputs: [(callID: String, output: String)]) {
-        guard isConversing else { return }
-        pendingCalls = []
-        for result in outputs {
-            send([
-                "type": "conversation.item.create",
-                "item": ["type": "function_call_output", "call_id": result.callID, "output": result.output],
-            ])
-        }
-        requestReply()
-    }
-
-    /// Hangs up: the conversation is over, and the next one starts fresh.
-    func endConversation() {
-        stop()
-        isConversing = false
-        pendingCalls = []
-        disconnect()
-    }
-
-    private func requestReply() {
-        countsAsAnswer = false
-        isOnAnswer = true
-        answerIsComplete = false
-        isResponding = true
-        isThinking = true
-        askedAt = .now
-        loggedFirstAudio = false
-        send(["type": "response.create", "response": ["output_modalities": ["audio"]]])
-        watchPlayback()
-    }
-
-    /// Tools called in a finished reply: `function_call` items in its output.
-    private func takeCalls(from response: [String: Any]?) {
-        let items = response?["output"] as? [[String: Any]] ?? []
-        let calls = items.compactMap { item -> FunctionCall? in
-            guard item["type"] as? String == "function_call",
-                  let callID = item["call_id"] as? String,
-                  let name = item["name"] as? String,
-                  !handledCalls.contains(callID) else { return nil }
-            return FunctionCall(callID: callID, name: name, arguments: item["arguments"] as? String ?? "{}")
-        }
-        guard !calls.isEmpty else { return }
-        for call in calls { handledCalls.insert(call.callID) }
-        pendingCalls = calls
     }
 
     /// Says `text` in the current voice, to try a voice out.
@@ -291,9 +136,6 @@ final class StudyPalSpeaker {
         if !loggedFirstText, !markdown.isEmpty, let askedAt {
             loggedFirstText = true
             Self.log.notice("First answer text after \(Self.seconds(since: askedAt), privacy: .public)s")
-            #if DEBUG
-            print("[voice] first answer text after \(Self.seconds(since: askedAt))s")
-            #endif
         }
         if markdown.count > handed {
             let rest = markdown.dropFirst(handed)
@@ -310,7 +152,7 @@ final class StudyPalSpeaker {
         watchPlayback()
     }
 
-    /// Stops talking now: you interrupted her, or closed the chat.
+    /// Stops talking now: you interrupted her, or closed her.
     func stop() {
         isOnAnswer = false
         waiting = ""
@@ -322,7 +164,6 @@ final class StudyPalSpeaker {
         buffers.reset()
         watchTask?.cancel()
         isTalking = false
-        isThinking = false
     }
 
     // MARK: Speaking
@@ -353,25 +194,11 @@ final class StudyPalSpeaker {
             sayWhatsWaiting()
         case "response.output_audio.delta":
             if isOnAnswer, let delta = event["delta"] as? String {
-                isThinking = false
                 isTalking = true
                 play(delta)
             }
-        case "response.output_audio_transcript.delta", "response.audio_transcript.delta":
-            if isConversing, let delta = event["delta"] as? String { replyText += delta }
         case "response.done":
             isResponding = false
-            if isConversing {
-                // This reply is complete; any tools it called run next.
-                let response = event["response"] as? [String: Any]
-                takeCalls(from: response)
-                answerIsComplete = true
-                isThinking = false
-                let said = replyText.isEmpty ? OpenAIClient.outputText(of: response) : replyText
-                replyText = ""
-                let words = said.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !words.isEmpty { lastReply = Reply(text: words) }
-            }
             sayWhatsWaiting()
             watchPlayback()
         case "error":
@@ -381,8 +208,6 @@ final class StudyPalSpeaker {
             guard (error?["code"] as? String) != "response_cancel_not_active" else { return }
             problem = OpenAIError(status: 0, message: message, code: error?["code"] as? String).localizedDescription
             isResponding = false
-            isThinking = false
-            if isConversing { answerIsComplete = true }
             sayWhatsWaiting()
             watchPlayback()
         default:
@@ -408,9 +233,6 @@ final class StudyPalSpeaker {
         if !loggedFirstAudio, let askedAt {
             loggedFirstAudio = true
             Self.log.notice("First audio after \(Self.seconds(since: askedAt), privacy: .public)s")
-            #if DEBUG
-            print("[voice] first audio after \(Self.seconds(since: askedAt))s")
-            #endif
         }
         buffers.add()
         // Called on the audio thread: it only counts down.
@@ -463,8 +285,6 @@ final class StudyPalSpeaker {
 
     private func closeWhenIdle() {
         closeTask?.cancel()
-        // A call stays connected until it's hung up (see `AskOverlay`).
-        guard !isConversing else { return }
         closeTask = Task {
             try? await Task.sleep(for: .seconds(45))
             guard !Task.isCancelled, !isTalking else { return }
@@ -491,11 +311,12 @@ final class StudyPalSpeaker {
         connectedVoice = voice
         isReady = false
         socket.resume()
-        var session: [String: Any] = [
+        let session: [String: Any] = [
             "type": "realtime",
             "output_modalities": ["audio"],
+            "instructions": Self.style,
             "audio": [
-                // No turn detection: the iPad hears you and sends your words.
+                // No turn detection: she only reads out what she's given.
                 "input": ["turn_detection": NSNull()],
                 "output": [
                     "format": ["type": "audio/pcm", "rate": 24_000] as [String: Any],
@@ -503,17 +324,6 @@ final class StudyPalSpeaker {
                 ] as [String: Any],
             ] as [String: Any],
         ]
-        if isConversing {
-            // She's the study pal herself, with her page tools.
-            session["instructions"] = conversationInstructions + "\n\n" + Self.conversationStyle
-            if !conversationTools.isEmpty {
-                session["tools"] = conversationTools
-                session["tool_choice"] = "auto"
-            }
-        } else {
-            // She only reads out what Claude wrote.
-            session["instructions"] = Self.style
-        }
         send(["type": "session.update", "session": session])
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -537,14 +347,8 @@ final class StudyPalSpeaker {
         socket = nil
         isReady = false
         isResponding = false
-        isThinking = false
-        // The conversation lived on that connection; the next starts fresh.
-        if isConversing {
-            isConversing = false
-            if isOnAnswer { problem = "I lost my voice for a moment. Tap me to talk again." }
-        }
         if isOnAnswer, !waiting.isEmpty {
-            problem = "I lost my voice for a moment. Ask me again?"
+            problem = "I lost my voice for a moment. My answer is in the chat."
         }
     }
 
@@ -554,9 +358,6 @@ final class StudyPalSpeaker {
         socket = nil
         isReady = false
         isResponding = false
-        isThinking = false
-        // A conversation lives on its connection.
-        isConversing = false
     }
 
     private func send(_ event: [String: Any]) {

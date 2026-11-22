@@ -7,7 +7,7 @@ struct VoicePicker: View {
     @AppStorage(StudyPalSpeaker.voiceKey) private var chosen = StudyPalSpeaker.defaultVoice
     @State private var sampler = StudyPalSpeaker()
 
-    private static let sample = "Hi! I'm your study pal. Tap me and ask me anything about your notes."
+    private static let sample = "Hi! I'm your study pal. Hold the mic and ask me anything about your notes."
 
     var body: some View {
         List {

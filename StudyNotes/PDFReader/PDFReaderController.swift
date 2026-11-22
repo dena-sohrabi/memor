@@ -35,19 +35,17 @@ final class PDFReaderController: UIViewController {
     private let positionDebouncer = Debouncer()
     private var eraserReturn: EraserAutoReturn?
     private var undoTaps: UndoTapGestures?
-    /// Gets a picture of the area circled with the Ask tool.
-    var onOpenAskThread: ((AskThread) -> Void)?
-    /// A saved chat was deleted from its marker.
-    var onDeleteAskThread: ((UUID) -> Void)?
+    /// This open PDF, for the study pal.
+    let palPageID = UUID()
+    /// Circle something for the study pal.
     private let askLasso = AskLassoView()
-    /// Markers on the pages that are on screen.
-    private var askMarkers: [UUID: AskMarkerButton] = [:]
-    /// Notes Claude adds land a little apart instead of on top of each other.
-    private var askInsertCount = 0
-    /// The page of the chat that's open, and the top-right corner of its
-    /// circled area (in page points), if any.
-    var askPageIndex: Int?
-    var askAnchor: CGPoint? { didSet { askInsertCount = 0 } }
+    /// Where things the study pal added beside the same circled area went,
+    /// so the next one goes somewhere else.
+    private var palPlaced: [CGRect] = []
+    private var palPlacedNear: CGRect?
+    /// The handwritten words she was last shown on each page, so she can
+    /// erase or move them.
+    private var palHandwriting: [Int: PalHandwriting] = [:]
 
     private lazy var textBoxes = TextBoxCoordinator(modelContext: modelContext, hooks: .init(
         undoManager: { [weak self] in self?.undoManager },
@@ -136,7 +134,7 @@ final class PDFReaderController: UIViewController {
 
         askLasso.frame = view.bounds
         askLasso.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        askLasso.onSelection = { [weak self] rect in self?.finishAsk(in: rect) }
+        askLasso.onSelection = { [weak self] rect in self?.finishCircle(in: rect) }
         view.addSubview(askLasso)
 
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: pdfView)
@@ -153,9 +151,29 @@ final class PDFReaderController: UIViewController {
         Task { [weak self] in self?.restorePosition() }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        PalWorkspace.shared.register(self)
+        // Opened by the study pal at a page: go there once the reader has
+        // put you back where you were.
+        if let request = PalNavigator.shared.pending(for: item.id), let index = request.pageIndex {
+            PalNavigator.shared.done(request)
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(400))
+                self?.goToPage(index)
+            }
+        }
+    }
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         saveNow()
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if askLasso.isActive { Pal.shared.stopCircling() }
+        PalWorkspace.shared.unregister(self)
     }
 
     // MARK: Toolbar actions
@@ -190,93 +208,34 @@ final class PDFReaderController: UIViewController {
         }
     }
 
-    /// The Ask tool: circle part of a page to ask Claude about it.
-    func setAskMode(_ on: Bool) {
+    /// Circling for the study pal: the next loop drawn on a page goes to her.
+    private func setCircling(_ on: Bool) {
         if on { view.endEditing(true) }
         askLasso.isActive = on
     }
 
-    /// Saves a new chat for the circled area, puts its marker on the page
-    /// and opens it.
-    private func finishAsk(in rect: CGRect) {
-        guard let image = askLasso.snapshot(of: view, rect: rect) else { return }
+    /// A loop was drawn: what's inside it goes to the study pal, with the
+    /// page it's on and where on it, in page points.
+    private func finishCircle(in rect: CGRect) {
         askLasso.isActive = false
         let center = view.convert(CGPoint(x: rect.midX, y: rect.midY), to: pdfView)
-        let corner = view.convert(CGPoint(x: rect.maxX, y: rect.minY), to: pdfView)
-        guard let page = pdfView.page(for: center, nearest: true) else { return }
+        guard let image = askLasso.snapshot(of: view, rect: rect),
+              let jpeg = image.jpegData(compressionQuality: 0.85),
+              let page = pdfView.page(for: center, nearest: true) else {
+            Pal.shared.stopCircling()
+            return
+        }
         let pageIndex = document.index(for: page)
-        let anchor = overlays[pageIndex].map { pdfView.convert(corner, to: $0) } ?? .zero
-        let thread = AskThread(anchor: anchor, pageIndex: pageIndex, imageData: image.jpegData(compressionQuality: 0.85))
-        modelContext.insert(thread)
-        thread.pdf = item
-        try? modelContext.save()
-        showAskMarker(for: thread)
-        askInsertCount = 0
-        onOpenAskThread?(thread)
-    }
-
-    private func showAskMarker(for thread: AskThread) {
-        guard askMarkers[thread.id] == nil, let pageIndex = thread.pageIndex,
-              let overlay = overlays[pageIndex] else { return }
-        let id = thread.id
-        let marker = AskMarkerButton(
-            threadID: id,
-            onOpen: { [weak self] in self?.openAskThread(id) },
-            onDelete: { [weak self] in self?.deleteAskThread(id) },
-            onMove: { [weak self] anchor in self?.moveAskThread(id, to: anchor) }
-        )
-        marker.place(at: thread.anchor)
-        overlay.textLayer.addSubview(marker)
-        askMarkers[id] = marker
-    }
-
-    /// A marker was dragged somewhere else on its page.
-    private func moveAskThread(_ id: UUID, to anchor: CGPoint) {
-        guard let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
-        thread.anchorX = anchor.x
-        thread.anchorY = anchor.y
-        saveAskThreads()
-    }
-
-    private func openAskThread(_ id: UUID) {
-        guard let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
-        askInsertCount = 0
-        onOpenAskThread?(thread)
-    }
-
-    /// Removes a saved chat and its marker.
-    func deleteAskThread(_ id: UUID) {
-        askMarkers.removeValue(forKey: id)?.removeFromSuperview()
-        if let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) {
-            modelContext.delete(thread)
-            try? modelContext.save()
+        let area: CGRect
+        if let overlay = overlays[pageIndex] {
+            area = view.convert(rect, to: overlay)
+        } else {
+            // From PDF space (y grows up) to page points from the top-left.
+            let box = page.bounds(for: .cropBox)
+            let pdfRect = pdfView.convert(view.convert(rect, to: pdfView), to: page)
+            area = CGRect(x: pdfRect.minX - box.minX, y: box.maxY - pdfRect.maxY, width: pdfRect.width, height: pdfRect.height)
         }
-        onDeleteAskThread?(id)
-    }
-
-    func saveAskThreads() {
-        guard isModelAlive else { return }
-        try? modelContext.save()
-    }
-
-    /// The page for Claude: a picture of it, its text and your notes on it.
-    func askPageContext(pageIndex: Int?) -> PageContext {
-        let index = pageIndex ?? editor.currentPageIndex
-        guard let page = document.page(at: index) else { return PageContext(imageData: nil, text: "") }
-        let bounds = page.bounds(for: .cropBox)
-        let scale = min(1568 / max(bounds.width, bounds.height, 1), 3)
-        let picture = page.thumbnail(of: CGSize(width: bounds.width * scale, height: bounds.height * scale), for: .cropBox)
-        var text = "Page \(index + 1) of \(document.pageCount)."
-        if let pageText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines), !pageText.isEmpty {
-            text += "\n\n" + String(pageText.prefix(20_000))
-        }
-        let notes = (item.textBoxes ?? [])
-            .filter { !$0.isDeleted && $0.pageIndex == index && !$0.plainText.isEmpty }
-            .map(\.plainText)
-        if !notes.isEmpty {
-            text += "\n\nThe user's notes on this page:\n" + notes.joined(separator: "\n\n")
-        }
-        return PageContext(imageData: picture.jpegData(compressionQuality: 0.8), text: text)
+        Pal.shared.circled(PalCircle(pageID: palPageID, pageIndex: pageIndex, rect: area, image: jpeg))
     }
 
     func setPageSidebarVisible(_ visible: Bool) {
@@ -374,7 +333,7 @@ final class PDFReaderController: UIViewController {
         item.modelContext != nil && !item.isDeleted
     }
 
-    /// Goes up with every change to the PDF's notes and ink, for `askPageVersion`.
+    /// Goes up with every change to the PDF's notes and ink, for `palVersion`.
     private var contentVersion = 0
 
     private func scheduleSave() {
@@ -427,8 +386,9 @@ final class PDFReaderController: UIViewController {
         pdfView.clearSelection()
     }
 
-    /// Turns a text selection into one highlight per page, snapped to lines.
-    private func addHighlight(from selection: PDFSelection) {
+    /// Turns a text selection into one highlight per page, snapped to lines,
+    /// in the color picked in the toolbar (or `color`).
+    private func addHighlight(from selection: PDFSelection, color: HighlightColor? = nil) {
         var rectsByPage: [Int: [CGRect]] = [:]
         var textByPage: [Int: [String]] = [:]
         for line in selection.selectionsByLine() {
@@ -446,7 +406,7 @@ final class PDFReaderController: UIViewController {
         for (pageIndex, rects) in rectsByPage.sorted(by: { $0.key < $1.key }) {
             let highlight = Highlight(
                 pageIndex: pageIndex,
-                color: editor.highlightColor,
+                color: color ?? editor.highlightColor,
                 rects: rects.map(CodableRect.init),
                 text: (textByPage[pageIndex] ?? []).joined(separator: " ")
             )
@@ -619,9 +579,6 @@ extension PDFReaderController: @preconcurrency PDFPageOverlayViewProvider {
         for box in item.textBoxes ?? [] where box.pageIndex == pageIndex && !box.isDeleted {
             textBoxes.showView(for: box)
         }
-        for thread in item.askThreads ?? [] where thread.pageIndex == pageIndex && !thread.isDeleted {
-            showAskMarker(for: thread)
-        }
         return overlay
     }
 
@@ -633,9 +590,6 @@ extension PDFReaderController: @preconcurrency PDFPageOverlayViewProvider {
         }
         textBoxes.forgetViews(in: overlay.textLayer)
         toolPicker.removeObserver(overlay.canvasView)
-        for case let marker as AskMarkerButton in overlay.textLayer.subviews {
-            askMarkers[marker.threadID] = nil
-        }
         if overlays[overlay.pageIndex] === overlay {
             overlays[overlay.pageIndex] = nil
         }
@@ -684,25 +638,174 @@ extension PDFReaderController: UIGestureRecognizerDelegate {
     }
 }
 
-// MARK: - Claude, the study pal
+// MARK: - The study pal
 
-/// On a PDF, Claude works with your typed notes. The PDF itself, your ink
-/// and your highlights stay as they are.
-extension PDFReaderController: AskPageActions {
+/// On a PDF, the study pal reads the pages, sees your ink and notes on
+/// them, and can write, mark and highlight. The PDF file itself and your
+/// own ink stay as they are.
+extension PDFReaderController: PalPage {
+    var palItemID: UUID { item.id }
+    var palKind: PalPageKind { .pdf }
+    var palItemTitle: String { item.title }
+    var palWhere: String { "page \(editor.currentPageIndex + 1) of \(document.pageCount)" }
     /// The page in view counts too: turning to another page is a new page for her.
-    var askPageVersion: Int { contentVersion &* 100_000 &+ editor.currentPageIndex }
-
+    var palVersion: Int { contentVersion &* 100_000 &+ editor.currentPageIndex }
+    var palWindow: UIWindow? { view.window }
     var canAddImages: Bool { false }
 
-    private var askPage: Int { askPageIndex ?? editor.currentPageIndex }
-
-    private var askPageSize: CGSize {
-        document.page(at: askPage)?.bounds(for: .cropBox).size ?? .zero
+    private func pageIndex(_ index: Int?) -> Int {
+        min(max(index ?? editor.currentPageIndex, 0), max(document.pageCount - 1, 0))
     }
 
-    func askPageItems() -> String {
-        let index = askPage
-        let size = askPageSize
+    private func pageSize(_ index: Int) -> CGSize {
+        document.page(at: index)?.bounds(for: .cropBox).size ?? .zero
+    }
+
+    /// A page's ink: from its overlay when it's on screen, or as saved.
+    private func ink(on index: Int) -> PKDrawing {
+        if let overlay = overlays[index] { return overlay.canvasView.drawing }
+        return inkRecord(for: index)?.drawingData.flatMap { try? PKDrawing(data: $0) } ?? PKDrawing()
+    }
+
+    func palSnapshot() -> PalSnapshot {
+        let index = pageIndex(nil)
+        let size = pageSize(index)
+        let picture = render(page: index, area: nil)
+        var text = "Page \(index + 1) of \(document.pageCount)."
+        if let pageText = document.page(at: index)?.string?.trimmingCharacters(in: .whitespacesAndNewlines), !pageText.isEmpty {
+            text += "\n\n" + String(pageText.prefix(20_000))
+        }
+        let notes = palNotes(pageIndex: index)
+        if !notes.isEmpty { text += "\n\nTheir typed notes on this page:\n" + notes }
+        let selection = pdfView.currentSelection?.string
+        return PalSnapshot(image: picture?.image, area: CGRect(origin: .zero, size: size), imageSize: picture?.size ?? .zero, text: text, selection: selection)
+    }
+
+    func palLook(at area: CGRect?, pageIndex index: Int?, labelHandwriting: Bool) -> (image: Data, area: CGRect)? {
+        let index = pageIndex(index)
+        let full = CGRect(origin: .zero, size: pageSize(index))
+        let area = (area ?? full).intersection(full)
+        guard !area.isNull else { return nil }
+        let labels = labelHandwriting ? handwriting(on: index).list(ink(on: index), within: area) : []
+        guard let picture = render(page: index, area: area, labels: labels) else { return nil }
+        return (picture.image, area)
+    }
+
+    private func handwriting(on index: Int) -> PalHandwriting {
+        if let existing = palHandwriting[index] { return existing }
+        let made = PalHandwriting()
+        palHandwriting[index] = made
+        return made
+    }
+
+    func palEraseHandwriting(ids: [String], region: CGRect?, pageIndex index: Int?) -> (result: String, isError: Bool) {
+        let index = pageIndex(index)
+        guard let overlay = overlays[index] else { return ("Page \(index + 1) isn't on screen. Go to it first (go_to_page).", true) }
+        return handwriting(on: index).erase(ids: ids, region: region, on: overlay.canvasView)
+    }
+
+    func palMoveHandwriting(ids: [String], to origin: CGPoint, pageIndex index: Int?) -> (result: String, isError: Bool) {
+        let index = pageIndex(index)
+        guard let overlay = overlays[index] else { return ("Page \(index + 1) isn't on screen. Go to it first (go_to_page).", true) }
+        return handwriting(on: index).move(ids: ids, to: origin, on: overlay.canvasView)
+    }
+
+    func palShowArea(_ area: CGRect?, pageIndex index: Int?) -> String? {
+        let index = pageIndex(index)
+        guard let page = document.page(at: index) else { return "There's no page \(index + 1)." }
+        if let area {
+            // From page points (top-left) to PDF space (y grows up).
+            let box = page.bounds(for: .cropBox)
+            let rect = CGRect(x: box.minX + area.minX, y: box.maxY - area.maxY, width: area.width, height: area.height)
+            pdfView.go(to: rect, on: page)
+        } else {
+            goToPage(index)
+        }
+        return nil
+    }
+
+    func palUndo() -> Bool { undo() }
+    func palRedo() -> Bool { redo() }
+
+    func palRemoveHighlights(_ text: String, pageIndex index: Int?) -> String? {
+        let index = pageIndex(index)
+        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matches = (item.highlights ?? []).filter { highlight in
+            !highlight.isDeleted && highlight.pageIndex == index
+                && (wanted.isEmpty || highlight.text.range(of: wanted, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
+        }
+        guard !matches.isEmpty else { return "No highlight with that text on page \(index + 1)." }
+        removeHighlights(matches.map(\.id))
+        return nil
+    }
+
+    /// A picture of an area of a page (page points from its top-left; nil
+    /// for all of it) with the PDF, your highlights, your ink and your typed
+    /// notes, as sharp as she can read it, and numbered boxes on `labels`.
+    private func render(page index: Int, area: CGRect?, labels: [PalInkGroup] = []) -> (image: Data, size: CGSize)? {
+        guard let page = document.page(at: index) else { return nil }
+        let box = page.bounds(for: .cropBox)
+        let area = area ?? CGRect(origin: .zero, size: box.size)
+        guard area.width > 0, area.height > 0 else { return nil }
+        let scale = min(PalRender.maxPixels / max(area.width, area.height), 6)
+        let size = CGSize(width: (area.width * scale).rounded(), height: (area.height * scale).rounded())
+        let drawing = ink(on: index)
+        var inkImage: UIImage?
+        if drawing.strokes.contains(where: { $0.renderBounds.intersects(area) }) {
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                inkImage = drawing.image(from: area, scale: scale)
+            }
+        }
+        let notes = (item.textBoxes ?? []).filter { !$0.isDeleted && $0.pageIndex == index && !$0.plainText.isEmpty }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let picture = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let cg = context.cgContext
+            // PDF space has y growing up, from the page's bottom-left.
+            cg.saveGState()
+            cg.translateBy(x: -area.minX * scale, y: (box.height - area.minY) * scale)
+            cg.scaleBy(x: scale, y: -scale)
+            page.draw(with: .cropBox, to: cg)
+            cg.restoreGState()
+            // Ink and notes are in page points from the top-left.
+            cg.saveGState()
+            cg.scaleBy(x: scale, y: scale)
+            cg.translateBy(x: -area.minX, y: -area.minY)
+            inkImage?.draw(in: area)
+            for note in notes {
+                let frame = CGRect(x: note.x, y: note.y, width: note.width, height: textBoxes.height(of: note.id))
+                guard frame.intersects(area) else { continue }
+                let text = note.richText.flatMap(RichText.decode) ?? NSAttributedString(string: note.plainText, attributes: [.font: TextBoxView.defaultFont])
+                text.draw(with: frame.insetBy(dx: 6, dy: 8), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            }
+            cg.restoreGState()
+            PalRender.drawLabels(labels, area: area, scale: scale, in: cg)
+        }
+        guard let data = picture.jpegData(compressionQuality: 0.8) else { return nil }
+        return (data, size)
+    }
+
+    /// The lines of the PDF's own text on a page, in page points from the
+    /// top-left, so nothing she adds covers them.
+    private func textLines(on index: Int) -> [CGRect] {
+        guard let page = document.page(at: index) else { return [] }
+        let box = page.bounds(for: .cropBox)
+        guard let all = page.selection(for: box) else { return [] }
+        return all.selectionsByLine().map { line in
+            let rect = line.bounds(for: page)
+            return CGRect(x: rect.minX - box.minX, y: box.maxY - rect.maxY, width: rect.width, height: rect.height)
+        }
+    }
+
+    func palStartCircling() { setCircling(true) }
+    func palStopCircling() { setCircling(false) }
+
+    func palItems(pageIndex index: Int?) -> String {
+        let index = pageIndex(index)
+        let size = pageSize(index)
         let notes: [[String: Any]] = (item.textBoxes ?? [])
             .filter { !$0.isDeleted && $0.pageIndex == index }
             .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
@@ -717,20 +820,25 @@ extension PDFReaderController: AskPageActions {
                     "text": String(box.plainText.prefix(400)),
                 ] as [String: Any]
             }
-        var description: [String: Any] = [
+        let words = handwriting(on: index).list(ink(on: index), within: nil).map { word -> [String: Any] in
+            ["id": word.id, "line": word.line, "x": word.rect.minX.rounded(), "y": word.rect.minY.rounded(), "width": word.rect.width.rounded(), "height": word.rect.height.rounded()]
+        }
+        let highlights = (item.highlights ?? []).filter { !$0.isDeleted && $0.pageIndex == index }.map { highlight -> [String: Any] in
+            ["text": String(highlight.text.prefix(200)), "color": highlight.color.rawValue]
+        }
+        let description: [String: Any] = [
             "coordinates": "Points on PDF page \(index + 1), from its top-left corner. x grows to the right, y grows down.",
             "page_size": ["width": size.width.rounded(), "height": size.height.rounded()],
             "items": notes,
-            "note": "These are the user's typed notes. The PDF's own text, ink and highlights aren't listed and can't be changed. Images can't be added to a PDF.",
+            "handwriting": words,
+            "highlights": highlights,
+            "note": "Items are the student's typed notes. Handwriting is listed word by word with ids for erase_handwriting and move_handwriting; use look_at with label_handwriting to see which is which. The PDF's own text can't be changed, and pictures can't be added to a PDF.",
         ]
-        if let askAnchor {
-            description["circled_area_top_right"] = ["x": askAnchor.x.rounded(), "y": askAnchor.y.rounded()]
-        }
-        return askJSON(description)
+        return PalJSON.string(description)
     }
 
-    func askPageNotes() -> String {
-        let index = askPage
+    func palNotes(pageIndex index: Int?) -> String {
+        let index = pageIndex(index)
         return (item.textBoxes ?? [])
             .filter { !$0.isDeleted && $0.pageIndex == index && !$0.plainText.isEmpty }
             .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
@@ -738,57 +846,146 @@ extension PDFReaderController: AskPageActions {
             .joined(separator: "\n\n")
     }
 
-    /// Adds a note beside the circled area or near the top of the page.
-    /// The page has to be on screen.
-    func askAddText(_ text: String) -> UUID? {
-        let index = askPage
-        guard overlays[index] != nil else { return nil }
-        let width: CGFloat = 260
-        let offset = CGFloat(askInsertCount) * 36
-        askInsertCount += 1
-        let origin = askAnchor.map { CGPoint(x: $0.x + 12, y: $0.y + offset) } ?? CGPoint(x: 40, y: 60 + offset)
-        return textBoxes.insertBox(at: clamped(origin, width: width), width: width, text: text, pageIndex: index)
+    /// Where to put something new on a page, as its top-left corner: as
+    /// close as it can to just right of what was circled (or the top of
+    /// the page), covering none of the PDF's text, the ink or the notes.
+    private func freeSpot(for size: CGSize, on index: Int, near: CGRect?) -> CGPoint {
+        if near != palPlacedNear {
+            palPlacedNear = near
+            palPlaced = []
+        }
+        let page = CGRect(origin: .zero, size: pageSize(index))
+        var taken = textLines(on: index)
+        taken += ink(on: index).strokes.map(\.renderBounds)
+        taken += (item.textBoxes ?? []).filter { !$0.isDeleted && $0.pageIndex == index }
+            .map { CGRect(x: $0.x, y: $0.y, width: $0.width, height: textBoxes.height(of: $0.id)) }
+        taken += palPlaced
+        let preferred = near.map { CGPoint(x: $0.maxX + 12, y: $0.minY) } ?? CGPoint(x: 40, y: 60)
+        let spot = PalSpot.find(for: size, preferred: preferred, visible: page, taken: taken, below: page.maxY - size.height - 8)
+        let kept = clamped(spot, size: size, on: index)
+        palPlaced.append(CGRect(origin: kept, size: size))
+        return kept
     }
 
-    func askAddImage(_ image: PreparedImage) -> UUID? { nil }
+    func palAddText(_ text: String, at origin: CGPoint?, in place: PalPlace) -> UUID? {
+        let index = pageIndex(place.pageIndex)
+        guard overlays[index] != nil else { return nil }
+        let width: CGFloat = 260
+        let measured = (text as NSString).boundingRect(
+            with: CGSize(width: width - 16, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: TextBoxView.defaultFont],
+            context: nil
+        )
+        let size = CGSize(width: width, height: ceil(measured.height) + 24)
+        let spot = origin.map { clamped($0, size: size, on: index) } ?? freeSpot(for: size, on: index, near: place.near)
+        return textBoxes.insertBox(at: spot, width: width, text: text, pageIndex: index)
+    }
 
-    func askMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
-        guard let box = textBoxes.box(id) else { return Self.unknownNote }
-        let origin = clamped(origin, width: box.width)
+    func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID? { nil }
+
+    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
+        let index = pageIndex(place.pageIndex)
+        guard let overlay = overlays[index] else {
+            return ("Page \(index + 1) isn't on screen. Ask them to go to it, or write on the page they're on.", true)
+        }
+        let page = pageSize(index)
+        // Without handwriting to match, a size that suits the page.
+        let style = PalInkReading.style(of: overlay.canvasView.drawing, fallbackHeight: max(page.height / 80, 7))
+        let height = min(max(letterHeight ?? style.letterHeight, 5), 80)
+        let maxWidth = max(min(page.width * 0.4, height * 40), height * 8)
+        let size = PalInk.measure(text, letterHeight: height, maxWidth: maxWidth)
+        let spot = origin ?? freeSpot(for: CGSize(width: size.width + 6, height: size.height + 6), on: index, near: place.near)
+        let writing = PalInk.handwriting(
+            text,
+            origin: spot,
+            letterHeight: height,
+            maxWidth: maxWidth,
+            color: color ?? style.color,
+            penWidth: style.penWidth * height / max(style.letterHeight, 1),
+            seed: UInt64.random(in: 1...UInt64.max)
+        )
+        guard !writing.strokes.isEmpty else { return ("There was nothing to write.", true) }
+        PalInkEditing.add(writing.strokes, to: overlay.canvasView, actionName: "Writing")
+        let box = writing.bounds
+        return ("Wrote it by hand on page \(index + 1) at x \(Int(box.minX)), y \(Int(box.minY)), width \(Int(box.width)), height \(Int(box.height)).", false)
+    }
+
+    func palMark(_ mark: PalInk.Mark, around rect: CGRect, to: CGPoint?, color: UIColor?, in place: PalPlace) -> String? {
+        let index = pageIndex(place.pageIndex)
+        guard let overlay = overlays[index] else {
+            return "Page \(index + 1) isn't on screen. Ask them to go to it."
+        }
+        let style = PalInkReading.style(of: overlay.canvasView.drawing, fallbackHeight: 10)
+        let strokes = PalInk.mark(mark, around: rect, to: to, color: color ?? PalColor.red, penWidth: max(style.penWidth, 1.6), seed: UInt64.random(in: 1...UInt64.max))
+        guard !strokes.isEmpty else { return "Couldn't draw that mark." }
+        PalInkEditing.add(strokes, to: overlay.canvasView, actionName: "Mark")
+        return nil
+    }
+
+    func palReadPages(_ pages: ClosedRange<Int>) -> String? {
+        let last = document.pageCount - 1
+        guard last >= 0 else { return "This PDF has no pages." }
+        let lower = max(pages.lowerBound, 0)
+        guard lower <= last else { return "This PDF has only \(document.pageCount) pages." }
+        let range = lower...min(max(pages.upperBound, lower), last)
+        return range.map { index in
+            let text = document.page(at: index)?.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return "Page \(index + 1):\n" + (text.isEmpty ? "(no text: it may be a scan or a picture; use look_at to see it)" : String(text.prefix(12_000)))
+        }
+        .joined(separator: "\n\n")
+    }
+
+    func palHighlight(_ text: String, pageIndex index: Int?, color: HighlightColor) -> String? {
+        let index = pageIndex(index)
+        guard let page = document.page(at: index) else { return "There's no page \(index + 1)." }
+        // Only this page is searched, so a long PDF doesn't hold things up.
+        let pageText = (page.string ?? "") as NSString
+        let range = pageText.range(of: text, options: [.caseInsensitive, .diacriticInsensitive])
+        guard range.location != NSNotFound, let hit = page.selection(for: range) else {
+            return "Couldn't find that text on page \(index + 1). Give it exactly as it appears there, or a shorter part of it."
+        }
+        addHighlight(from: hit, color: color)
+        return nil
+    }
+
+    func palMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
+        guard let box = textBoxes.box(id), let index = box.pageIndex else { return Self.unknownNote }
+        let origin = clamped(origin, size: CGSize(width: box.width, height: 40), on: index)
         UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseInOut]) {
             _ = self.textBoxes.setBoxFrame(id: id, origin: origin)
         }
         return nil
     }
 
-    func askResizeItem(_ id: UUID, width: CGFloat) -> String? {
-        guard let box = textBoxes.box(id) else { return Self.unknownNote }
-        let width = min(width, max(askPageSize.width - box.x, 80))
+    func palResizeItem(_ id: UUID, width: CGFloat) -> String? {
+        guard let box = textBoxes.box(id), let index = box.pageIndex else { return Self.unknownNote }
+        let width = min(width, max(pageSize(index).width - box.x, 80))
         UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseInOut]) {
             _ = self.textBoxes.setBoxFrame(id: id, width: width)
         }
         return nil
     }
 
-    func askEditText(_ id: UUID, text: String) -> String? {
+    func palEditText(_ id: UUID, text: String) -> String? {
         textBoxes.replaceText(id: id, with: text) ? nil : Self.unknownNote
     }
 
-    func askDeleteItem(_ id: UUID) -> String? {
+    func palDeleteItem(_ id: UUID) -> String? {
         guard textBoxes.box(id) != nil else { return Self.unknownNote }
         textBoxes.removeBox(id: id, undoable: true)
         return nil
     }
 
-    private static let unknownNote = "No note with that id. Call get_page_items for the current ids."
+    private static let unknownNote = "No typed note with that id. Call get_page_items for the current ids."
 
-    /// Keeps a note on its page.
-    private func clamped(_ origin: CGPoint, width: CGFloat) -> CGPoint {
-        let size = askPageSize
-        guard size.width > 0, size.height > 0 else { return origin }
+    /// Keeps something on its page.
+    private func clamped(_ origin: CGPoint, size: CGSize, on index: Int) -> CGPoint {
+        let page = pageSize(index)
+        guard page.width > 0, page.height > 0 else { return origin }
         return CGPoint(
-            x: max(8, min(origin.x, size.width - width - 8)),
-            y: max(8, min(origin.y, size.height - 40))
+            x: max(4, min(origin.x, page.width - size.width - 4)),
+            y: max(4, min(origin.y, page.height - size.height - 4))
         )
     }
 }

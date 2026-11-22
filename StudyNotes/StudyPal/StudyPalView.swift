@@ -7,7 +7,7 @@ import UIKit.UIGestureRecognizerSubclass
 enum StudyPalMood: Equatable {
     /// Breathing, floating, blinking, and now and then fidgeting.
     case idle
-    /// Claude is working: she gazes up and holds the thought.
+    /// She's working out her answer: she gazes up and holds the thought.
     case thinking
     /// An answer is streaming in: she talks.
     case talking
@@ -15,13 +15,13 @@ enum StudyPalMood: Equatable {
 
 /// A one-off reaction to the chat, played over her mood.
 enum StudyPalReaction: Equatable {
-    /// Hello, when Ask Claude opens.
+    /// Hello, when she comes out or her card opens.
     case wave
     /// The user started typing, or she started listening.
     case listen
     /// An answer is done.
     case nod
-    /// Claude changed the page.
+    /// She changed a page.
     case delight
     /// Something went wrong.
     case sad

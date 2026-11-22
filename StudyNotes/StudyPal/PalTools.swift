@@ -1,0 +1,716 @@
+import PDFKit
+import SwiftData
+import UIKit
+import UserNotifications
+
+/// Options she wants you to pick from, shown in a small card: buttons, or
+/// pictures in a grid. Tap one, or just tell her.
+struct PalChoice: Identifiable {
+    struct Option: Identifiable {
+        let id: Int
+        let label: String
+        let imageURL: URL?
+    }
+
+    let id = UUID()
+    let question: String
+    let options: [Option]
+
+    var hasPictures: Bool { options.contains { $0.imageURL != nil } }
+}
+
+/// Everything the study pal can do, as tools for her model: look closely
+/// at a page, write by hand, add typed notes and pictures, mark things,
+/// rearrange typed notes and pictures, highlight and read PDFs, search all
+/// your notes, show options, set a reminder, and remember things. The same
+/// tools whether you type to her or talk.
+///
+/// Your own handwriting is never moved or changed, and Undo takes back
+/// anything she does.
+@MainActor
+enum PalTools {
+    /// What a tool needs from the talk it's in.
+    struct Context {
+        /// What was circled with the message she's answering, if anything.
+        let circle: PalCircle?
+        /// Shows options and waits for the pick.
+        let offerChoices: (_ question: String, _ options: [PalChoice.Option]) async -> String
+    }
+
+    /// What a tool did, for her: text, or text and pictures.
+    struct Outcome {
+        /// A string, or an array of `input_text` and `input_image` parts.
+        var output: Any
+        var isError = false
+        /// It changed a page, so she can be pleased.
+        var changedPage = false
+
+        static func text(_ text: String, isError: Bool = false, changedPage: Bool = false) -> Outcome {
+            Outcome(output: text, isError: isError, changedPage: changedPage)
+        }
+    }
+
+    // MARK: Definitions
+
+    /// The tools, in the Responses API's format.
+    static func definitions(canDraw: Bool) -> [[String: Any]] {
+        let page: [String: Any] = ["type": ["string", "null"], "description": "Which open page: N1, P1 and so on. Null for the one they're using."]
+        let pdfPage: [String: Any] = ["type": ["integer", "null"], "description": "On a PDF, which of its pages, from 1. Null for the page they circled on, or else the one in view. Ignored on notebooks."]
+        let x: [String: Any] = ["type": ["number", "null"], "description": "Left edge, in page points. Null to let Memor find a free spot beside what they circled, or in view."]
+        let y: [String: Any] = ["type": ["number", "null"], "description": "Top edge, in page points. Null together with x."]
+        let id: [String: Any] = ["type": "string", "description": "The item's id from get_page_items."]
+        let color: [String: Any] = ["type": ["string", "null"], "description": "red, green, blue, orange, purple, pink, black or gray, or #RRGGBB. Null for the default."]
+        let number: [String: Any] = ["type": "number"]
+        let text: (String) -> [String: Any] = { ["type": "string", "description": $0] }
+
+        var tools: [[String: Any]] = [
+            ["type": "web_search"],
+            function("look_at",
+                     "See part of a page sharply, to read small or unclear handwriting, check working, or see what's off screen. Give an area in page points, or all four as null for everything on the page. With label_handwriting, each handwritten word gets a numbered pink box (h1, h2…) with the id to use in erase_handwriting and move_handwriting. Returns a picture and the area it shows.",
+                     ["page": page, "pdf_page": pdfPage,
+                      "x": ["type": ["number", "null"]], "y": ["type": ["number", "null"]],
+                      "width": ["type": ["number", "null"]], "height": ["type": ["number", "null"]],
+                      "label_handwriting": ["type": "boolean", "description": "Draw numbered boxes on the handwritten words."]]),
+            function("get_page_items",
+                     "List what's on a page with positions in page points (x grows to the right, y grows down): the area on screen, handwritten words with their ids (h1, h2…) and lines, typed notes with their text and ids, pictures, and on a PDF its highlights. Use it before placing something yourself or changing anything.",
+                     ["page": page, "pdf_page": pdfPage]),
+            function("erase_handwriting",
+                     "Erase the student's own handwriting: words by their ids (from look_at with label_handwriting, or get_page_items), or every stroke lying mostly inside an area. Only erase what they asked for. Undo brings it back.",
+                     ["page": page, "pdf_page": pdfPage,
+                      "ids": ["type": "array", "items": ["type": "string"], "description": "Handwritten word ids, like h12. Empty to erase by area."],
+                      "x": ["type": ["number", "null"]], "y": ["type": ["number", "null"]],
+                      "width": ["type": ["number", "null"]], "height": ["type": ["number", "null"]]]),
+            function("move_handwriting",
+                     "Move some of the student's handwriting (words by id, together as a block) so its top-left corner is at (x, y). Use it to tidy and organize their notes. Undo puts it back.",
+                     ["page": page, "pdf_page": pdfPage,
+                      "ids": ["type": "array", "items": ["type": "string"], "description": "Handwritten word ids, like h12."],
+                      "x": number, "y": number]),
+            function("show_area",
+                     "Scroll and zoom the page so an area fills the screen, to show them something. All four null to fit everything on the page (on a PDF, go to the page).",
+                     ["page": page, "pdf_page": pdfPage,
+                      "x": ["type": ["number", "null"]], "y": ["type": ["number", "null"]],
+                      "width": ["type": ["number", "null"]], "height": ["type": ["number", "null"]]]),
+            function("undo",
+                     "Undo the last change on a page, theirs or yours, like the Undo button.",
+                     ["page": page]),
+            function("redo",
+                     "Redo what was last undone on a page.",
+                     ["page": page]),
+            function("remove_highlight",
+                     "Remove highlights on a PDF page whose text contains the given text.",
+                     ["page": page, "pdf_page": pdfPage, "text": text("Text in the highlight to remove.")]),
+            function("write_by_hand",
+                     "Write on the page by hand, as ink in a handwriting style: a word, a definition, a short answer, a label. Keep it short (a few words to a few lines). Use it to add to handwritten notes. Leave x and y null to write beside what they circled, or in free space in view.",
+                     ["page": page, "pdf_page": pdfPage, "text": text("What to write. Use \\n for a new line."), "x": x, "y": y,
+                      "letter_height": ["type": ["number", "null"], "description": "Height of a capital letter, in page points. Null to match their handwriting."],
+                      "color": color]),
+            function("add_note",
+                     "Add a typed note to the page, in the page's own text style. For longer text, or where their notes are typed. Plain text with simple line breaks.",
+                     ["page": page, "pdf_page": pdfPage, "text": text("The note."), "x": x, "y": y]),
+            function("mark",
+                     "Draw a hand-drawn mark on the page, in ink: circle, underline, double_underline, box or strike around an area; check or cross beside it; bracket on its left; or an arrow from the area to a point (to_x, to_y). Use it to point at things, like a mistake (red) or what's right (green).",
+                     ["page": page, "pdf_page": pdfPage,
+                      "kind": ["type": "string", "enum": ["circle", "underline", "double_underline", "box", "strike", "arrow", "check", "cross", "bracket"]],
+                      "x": number, "y": number, "width": number, "height": number,
+                      "to_x": ["type": ["number", "null"], "description": "Where an arrow points, in page points. Null otherwise."],
+                      "to_y": ["type": ["number", "null"]],
+                      "color": color]),
+            function("move_item",
+                     "Move a typed note or picture so its top-left corner is at (x, y), in page points.",
+                     ["page": page, "id": id, "x": number, "y": number]),
+            function("resize_item",
+                     "Change the width of a typed note or picture, in page points. Pictures keep their shape; notes rewrap.",
+                     ["page": page, "id": id, "width": number]),
+            function("edit_text",
+                     "Replace all the text of a typed note, to fix, rewrite, shorten or translate it.",
+                     ["page": page, "id": id, "text": text("The note's new text, in full.")]),
+            function("delete_item",
+                     "Delete a typed note or picture. Only when they ask you to remove something.",
+                     ["page": page, "id": id]),
+            function("highlight_text",
+                     "Highlight text on a PDF page. Give the exact text as it appears on the page.",
+                     ["page": page, "pdf_page": pdfPage, "text": text("The exact text to highlight."),
+                      "color": ["type": "string", "enum": ["yellow", "green", "blue", "pink"]]]),
+            function("read_pages",
+                     "Read the text of a PDF's pages, up to 10 at a time.",
+                     ["page": page, "from": ["type": "integer", "description": "First page, from 1."], "to": ["type": "integer", "description": "Last page."]]),
+            function("search_notes",
+                     "Search all their notebooks and PDFs (titles, page titles, typed notes and PDF text; not handwriting) for a word or topic. Returns where it comes up.",
+                     ["query": text("What to look for.")]),
+            function("offer_choices",
+                     "Show them a few options on screen and wait for their pick. Only when they ask to see options or to choose (\"show me some pictures to pick from\"); otherwise choose yourself. For pictures, give each a direct https link to an image file. Returns their pick, or what they said instead.",
+                     ["question": text("A short question shown above the options."),
+                      "options": [
+                        "type": "array",
+                        "description": "Two to six options.",
+                        "items": [
+                            "type": "object",
+                            "properties": [
+                                "label": text("A short label."),
+                                "image_url": ["type": ["string", "null"], "description": "A direct https link to a picture for this option, or null."],
+                            ] as [String: Any],
+                            "required": ["label", "image_url"],
+                            "additionalProperties": false,
+                        ] as [String: Any],
+                      ] as [String: Any]]),
+            function("set_reminder",
+                     "Remind them later with a notification, even if Memor is closed: to come back from a break, to review something, before an exam.",
+                     ["minutes": ["type": "number", "description": "How many minutes from now."],
+                      "message": text("What the notification says, in your voice, short.")]),
+            function("remember",
+                     "Remember something for later talks: about the student, about how they like you to be, or about the notebook or PDF it concerns.",
+                     ["text": text("One short sentence in the third person."),
+                      "about": ["type": "string", "enum": ["student", "style", "page"]],
+                      "page": page]),
+            function("recall",
+                     "Look up earlier talks and what you remember about their notebooks and PDFs.",
+                     ["query": text("What to look for, in a few words.")]),
+        ]
+        tools += PalAppTools.definitions()
+        if canDraw {
+            tools.append(function("add_image_from_web",
+                                  "Put a picture from the web on a notebook page, beside what they circled or in view. Find a direct https link to an image file first (Wikimedia Commons is good). If it fails, try another link.",
+                                  ["page": page, "image_url": text("Direct https link to the image file."), "description": text("What it shows.")]))
+            tools.append(function("draw_picture",
+                                  "Draw a new picture with an image model and put it on a notebook page, beside what they circled or in view. Write a detailed prompt: subject, style, colors, and any labels spelled out exactly (few and short). For diagrams that sit on their notes, ask for a clean, simple style with a transparent background. Takes up to a minute.",
+                                  ["page": page, "prompt": text("What to draw, in detail."), "description": text("A short description."),
+                                   "transparent_background": ["type": "boolean"]]))
+        }
+        return tools
+    }
+
+    static func function(_ name: String, _ description: String, _ properties: [String: Any]) -> [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": description,
+            "strict": true,
+            "parameters": [
+                "type": "object",
+                "properties": properties,
+                "required": properties.keys.sorted(),
+                "additionalProperties": false,
+            ] as [String: Any],
+        ]
+    }
+
+    /// What she's doing, for the chat card, while a tool runs.
+    static func status(for name: String) -> String? {
+        switch name {
+        case "web_search": "Searching the web…"
+        case "look_at": "Looking closely…"
+        case "get_page_items": "Looking at your page…"
+        case "web_fetch": "Reading a web page…"
+        case "erase_handwriting": "Erasing…"
+        case "move_handwriting": "Tidying your page…"
+        case "show_area", "go_to_page", "open_item": "Showing you…"
+        case "undo", "redo": "Undoing…"
+        case "remove_highlight": "Removing a highlight…"
+        case "list_library", "list_pages": "Looking at your library…"
+        case "create_notebook", "add_page": "Making it…"
+        case "rename_item", "rename_page": "Renaming…"
+        case "move_page": "Moving a page…"
+        case "delete_page": "Waiting for you to confirm…"
+        case "set_my_name": "Trying on my new name…"
+        case "write_by_hand": "Writing on your page…"
+        case "add_note": "Adding a note…"
+        case "mark": "Marking your page…"
+        case "move_item", "resize_item": "Moving things around…"
+        case "edit_text": "Editing a note…"
+        case "delete_item": "Removing something…"
+        case "delete_from_library": "Waiting for you to confirm…"
+        case "highlight_text": "Highlighting…"
+        case "read_pages": "Reading…"
+        case "search_notes": "Looking through your notes…"
+        case "offer_choices": "Waiting for you to choose…"
+        case "set_reminder": "Setting a reminder…"
+        case "remember", "recall": "Remembering…"
+        case "add_image_from_web": "Adding a picture…"
+        case "draw_picture": "Drawing a picture…"
+        default: nil
+        }
+    }
+
+    // MARK: Running
+
+    static func run(name: String, arguments: String, context: Context) async -> Outcome {
+        guard let input = (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any] else {
+            return .text("The arguments weren't valid JSON.", isError: true)
+        }
+        if let outcome = await PalAppTools.run(name: name, input: input, context: context) {
+            return outcome
+        }
+        switch name {
+        case "search_notes":
+            return .text(await PalLibrary.search(string(input["query"]) ?? ""))
+        case "offer_choices":
+            return await offerChoices(input, context: context)
+        case "set_reminder":
+            return await PalReminders.schedule(minutes: number(input["minutes"]) ?? 0, message: string(input["message"]) ?? "")
+        case "remember":
+            return remember(input)
+        case "recall":
+            let found = PalMemoryStore.shared.recall(string(input["query"]) ?? "")
+            return .text(found.isEmpty ? "Nothing about that in what you remember." : found.joined(separator: "\n"))
+        case "add_image_from_web":
+            return await addImage(input, context: context)
+        case "draw_picture":
+            return await drawPicture(input, context: context)
+        default:
+            break
+        }
+
+        guard let page = openPage(for: input) else {
+            return .text(input["page"] is String ? "No open page is called that. The open pages are listed with their names at the top of the message." : "No notebook page or PDF is open right now.", isError: true)
+        }
+        let place = placement(for: input, on: page, circle: context.circle)
+        switch name {
+        case "look_at":
+            return look(at: input, on: page, in: place)
+
+        case "erase_handwriting":
+            let ids = (input["ids"] as? [Any] ?? []).compactMap { $0 as? String }
+            let region = area(input)
+            guard !ids.isEmpty || region != nil else { return .text("Give word ids, or an area.", isError: true) }
+            let erased = page.palEraseHandwriting(ids: ids, region: region, pageIndex: place.pageIndex)
+            return .text(erased.result, isError: erased.isError, changedPage: !erased.isError)
+
+        case "move_handwriting":
+            let ids = (input["ids"] as? [Any] ?? []).compactMap { $0 as? String }
+            guard !ids.isEmpty, let origin = point(input["x"], input["y"]) else {
+                return .text("Give word ids, and x and y for where they go.", isError: true)
+            }
+            let moved = page.palMoveHandwriting(ids: ids, to: origin, pageIndex: place.pageIndex)
+            return .text(moved.result, isError: moved.isError, changedPage: !moved.isError)
+
+        case "show_area":
+            return page.palShowArea(area(input), pageIndex: place.pageIndex).map { Outcome.text($0, isError: true) } ?? .text("Showing it.")
+
+        case "undo":
+            return page.palUndo() ? .text("Undid the last change.", changedPage: true) : .text("There's nothing to undo.", isError: true)
+
+        case "redo":
+            return page.palRedo() ? .text("Redid it.", changedPage: true) : .text("There's nothing to redo.", isError: true)
+
+        case "remove_highlight":
+            return changed(page.palRemoveHighlights(string(input["text"]) ?? "", pageIndex: place.pageIndex), "Removed the highlight.")
+
+        case "get_page_items":
+            var description = page.palItems(pageIndex: place.pageIndex)
+            if let near = place.near {
+                description += "\n\nThey circled the area x \(Int(near.minX)), y \(Int(near.minY)), width \(Int(near.width)), height \(Int(near.height))."
+            }
+            return .text(description)
+
+        case "write_by_hand":
+            guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be a non-empty string.", isError: true) }
+            let written = page.palWrite(
+                text,
+                at: point(input["x"], input["y"]),
+                letterHeight: number(input["letter_height"]).map { CGFloat($0) },
+                color: PalColor.parse(string(input["color"])),
+                in: place
+            )
+            return .text(written.result, isError: written.isError, changedPage: !written.isError)
+
+        case "add_note":
+            guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be a non-empty string.", isError: true) }
+            guard let id = page.palAddText(text, at: point(input["x"], input["y"]), in: place) else {
+                return .text("Couldn't add the note there. The page has to be on screen.", isError: true)
+            }
+            return .text("Added a typed note with id \(id.uuidString).", changedPage: true)
+
+        case "mark":
+            guard let kind = mark(string(input["kind"])),
+                  let x = number(input["x"]), let y = number(input["y"]),
+                  let width = number(input["width"]), let height = number(input["height"]) else {
+                return .text("`kind` must be one of the marks, and x, y, width and height numbers.", isError: true)
+            }
+            let rect = CGRect(x: x, y: y, width: max(width, 1), height: max(height, 1))
+            let problem = page.palMark(kind, around: rect, to: point(input["to_x"], input["to_y"]), color: PalColor.parse(string(input["color"])), in: place)
+            return problem.map { Outcome.text($0, isError: true) } ?? Outcome.text("Marked it.", changedPage: true)
+
+        case "move_item":
+            guard let id = itemID(input), let origin = point(input["x"], input["y"]) else {
+                return .text("`id` must be an item id, and x and y numbers.", isError: true)
+            }
+            return changed(page.palMoveItem(id, to: origin), "Moved it.")
+
+        case "resize_item":
+            guard let id = itemID(input), let width = number(input["width"]), width > 0 else {
+                return .text("`id` must be an item id, and `width` a positive number.", isError: true)
+            }
+            return changed(page.palResizeItem(id, width: width), "Resized it.")
+
+        case "edit_text":
+            guard let id = itemID(input), let text = string(input["text"]), !text.isEmpty else {
+                return .text("`id` must be a typed note's id, and `text` a non-empty string.", isError: true)
+            }
+            return changed(page.palEditText(id, text: text), "Replaced the text.")
+
+        case "delete_item":
+            guard let id = itemID(input) else { return .text("`id` must be an item id.", isError: true) }
+            return changed(page.palDeleteItem(id), "Deleted it. They can undo this.")
+
+        case "highlight_text":
+            guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be the text to highlight.", isError: true) }
+            let color = HighlightColor(rawValue: string(input["color"]) ?? "") ?? .yellow
+            return changed(page.palHighlight(text, pageIndex: place.pageIndex, color: color), "Highlighted it.")
+
+        case "read_pages":
+            let from = max(Int(number(input["from"]) ?? 1), 1)
+            let to = min(max(Int(number(input["to"]) ?? Double(from)), from), from + 9)
+            guard let text = page.palReadPages((from - 1)...(to - 1)) else {
+                return .text("That page is a notebook page, not a PDF.", isError: true)
+            }
+            return .text(text)
+
+        default:
+            return .text("There's no tool called \(name).", isError: true)
+        }
+    }
+
+    // MARK: Tools
+
+    /// An area from x, y, width and height, if all four are given.
+    private static func area(_ input: [String: Any]) -> CGRect? {
+        guard let x = number(input["x"]), let y = number(input["y"]),
+              let width = number(input["width"]), let height = number(input["height"]) else { return nil }
+        return CGRect(x: x, y: y, width: max(width, 8), height: max(height, 8))
+    }
+
+    private static func look(at input: [String: Any], on page: PalPage, in place: PalPlace) -> Outcome {
+        let labels = input["label_handwriting"] as? Bool ?? false
+        guard let look = page.palLook(at: area(input), pageIndex: place.pageIndex, labelHandwriting: labels) else {
+            return .text("There's nothing there to see.", isError: true)
+        }
+        let shown = look.area
+        let note = "\(PalWorkspace.shared.shortID(of: page)): this shows page points x \(Int(shown.minX))–\(Int(shown.maxX)), y \(Int(shown.minY))–\(Int(shown.maxY))."
+        return Outcome(output: [
+            ["type": "input_text", "text": note],
+            ["type": "input_image", "image_url": "data:image/jpeg;base64," + look.image.base64EncodedString(), "detail": "high"],
+        ] as [[String: Any]])
+    }
+
+    private static func offerChoices(_ input: [String: Any], context: Context) async -> Outcome {
+        let question = string(input["question"]) ?? ""
+        let options = (input["options"] as? [[String: Any]] ?? []).enumerated().compactMap { index, option -> PalChoice.Option? in
+            guard let label = string(option["label"]), !label.isEmpty else { return nil }
+            let url = string(option["image_url"]).flatMap { URL(string: $0) }.flatMap { $0.scheme == "https" ? $0 : nil }
+            return PalChoice.Option(id: index, label: label, imageURL: url)
+        }
+        guard options.count >= 2 else { return .text("Give at least two options.", isError: true) }
+        return .text(await context.offerChoices(question, options))
+    }
+
+    private static func remember(_ input: [String: Any]) -> Outcome {
+        guard PalMemoryStore.isOn else { return .text("Remembering is turned off in Settings, so you can't keep this.", isError: true) }
+        guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be a sentence.", isError: true) }
+        switch string(input["about"]) {
+        case "page":
+            guard let page = openPage(for: input) else { return .text("No notebook or PDF is open to remember it with.", isError: true) }
+            PalMemoryStore.shared.remember(text, kind: .about, itemID: page.palItemID, itemTitle: page.palItemTitle)
+        case "style":
+            PalMemoryStore.shared.remember(text, kind: .style, itemID: nil, itemTitle: nil)
+        default:
+            PalMemoryStore.shared.remember(text, kind: .about, itemID: nil, itemTitle: nil)
+        }
+        return .text("Remembered.")
+    }
+
+    private static func addImage(_ input: [String: Any], context: Context) async -> Outcome {
+        guard let target = openPage(for: input), target.canAddImages else { return .text("Pictures can only go on notebook pages.", isError: true) }
+        guard let link = string(input["image_url"]), let url = URL(string: link) else { return .text("`image_url` must be a link.", isError: true) }
+        let pageID = target.palPageID
+        let place = placement(for: input, on: target, circle: context.circle)
+        do {
+            let data = try await ImageDownloader.fetch(url)
+            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data) }.value
+            guard let prepared else { return .text("That link isn't an image Memor can read. Try another.", isError: true) }
+            // The page may have closed while it downloaded.
+            guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
+                return .text("Couldn't add the picture. The page may have closed.", isError: true)
+            }
+            return .text("Added a picture with id \(id.uuidString).", changedPage: true)
+        } catch {
+            return .text("\(error.localizedDescription) Try another link.", isError: true)
+        }
+    }
+
+    private static func drawPicture(_ input: [String: Any], context: Context) async -> Outcome {
+        guard let target = openPage(for: input), target.canAddImages else { return .text("Pictures can only go on notebook pages.", isError: true) }
+        guard let prompt = string(input["prompt"]), !prompt.isEmpty else { return .text("`prompt` must say what to draw.", isError: true) }
+        let pageID = target.palPageID
+        let place = placement(for: input, on: target, circle: context.circle)
+        do {
+            let data = try await OpenAIClient.generateImage(prompt: prompt, transparent: input["transparent_background"] as? Bool ?? false)
+            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data) }.value
+            guard let prepared else { return .text("The picture came back in a form Memor can't read. Try again.", isError: true) }
+            guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
+                return .text("Couldn't add the picture. The page may have closed.", isError: true)
+            }
+            return .text("Drew a picture and added it with id \(id.uuidString).", changedPage: true)
+        } catch is CancellationError {
+            return .text("Stopped.", isError: true)
+        } catch {
+            return .text("Couldn't draw it: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: Reading arguments
+
+    /// The page a tool is for: the one named, or the one they're using.
+    private static func openPage(for input: [String: Any]) -> PalPage? {
+        if let name = string(input["page"]), !name.isEmpty {
+            return PalWorkspace.shared.page(shortID: name)
+        }
+        return PalWorkspace.shared.focusedPage ?? PalWorkspace.shared.visiblePages.first
+    }
+
+    /// Which PDF page, and what to put things beside: what they circled,
+    /// when it's on this page.
+    private static func placement(for input: [String: Any], on page: PalPage, circle: PalCircle?) -> PalPlace {
+        let circle = circle?.pageID == page.palPageID ? circle : nil
+        var pageIndex = number(input["pdf_page"]).map { Int($0) - 1 }
+        if pageIndex == nil { pageIndex = circle?.pageIndex }
+        let isSamePage = page.palKind == .notebook || circle?.pageIndex == pageIndex
+        return PalPlace(pageIndex: page.palKind == .pdf ? pageIndex : nil, near: isSamePage ? circle?.rect : nil)
+    }
+
+    private static func string(_ value: Any?) -> String? {
+        (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber, number.doubleValue.isFinite else { return nil }
+        return number.doubleValue
+    }
+
+    private static func point(_ x: Any?, _ y: Any?) -> CGPoint? {
+        guard let x = number(x), let y = number(y) else { return nil }
+        return CGPoint(x: x, y: y)
+    }
+
+    private static func itemID(_ input: [String: Any]) -> UUID? {
+        string(input["id"]).flatMap(UUID.init(uuidString:))
+    }
+
+    private static func mark(_ name: String?) -> PalInk.Mark? {
+        switch name {
+        case "circle": .circle
+        case "underline": .underline
+        case "double_underline": .doubleUnderline
+        case "box": .box
+        case "strike": .strike
+        case "arrow": .arrow
+        case "check": .check
+        case "cross": .cross
+        case "bracket": .bracket
+        default: nil
+        }
+    }
+
+    private static func changed(_ problem: String?, _ success: String) -> Outcome {
+        problem.map { Outcome.text($0, isError: true) } ?? Outcome.text(success, changedPage: true)
+    }
+}
+
+// MARK: - Colors
+
+/// Ink colors she can name.
+enum PalColor {
+    static let red = UIColor(red: 0.89, green: 0.22, blue: 0.24, alpha: 1)
+    static let green = UIColor(red: 0.13, green: 0.62, blue: 0.33, alpha: 1)
+
+    static func parse(_ name: String?) -> UIColor? {
+        guard let name = name?.lowercased(), !name.isEmpty else { return nil }
+        switch name {
+        case "red": return red
+        case "green": return green
+        case "blue": return UIColor(red: 0.16, green: 0.42, blue: 0.86, alpha: 1)
+        case "orange": return UIColor(red: 0.95, green: 0.52, blue: 0.11, alpha: 1)
+        case "purple": return UIColor(red: 0.52, green: 0.30, blue: 0.80, alpha: 1)
+        case "pink": return UIColor(red: 0.91, green: 0.36, blue: 0.62, alpha: 1)
+        case "black": return .black
+        case "gray", "grey": return .gray
+        default: break
+        }
+        let hex = name.hasPrefix("#") ? String(name.dropFirst()) : name
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        return UIColor(
+            red: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
+    }
+}
+
+// MARK: - Searching all your notes
+
+/// Your whole library, for the study pal: what's in it, and searching it.
+@MainActor
+enum PalLibrary {
+    /// Set when the app starts.
+    static var container: ModelContainer?
+
+    /// Your notebooks and PDFs by title, most recent first, for when no
+    /// page is open.
+    static func overview() -> String {
+        guard let context = container?.mainContext else { return "" }
+        let notebooks = (try? context.fetch(FetchDescriptor<Notebook>(sortBy: [SortDescriptor(\.modifiedAt, order: .reverse)]))) ?? []
+        let pdfs = (try? context.fetch(FetchDescriptor<PDFItem>(sortBy: [SortDescriptor(\.lastOpenedAt, order: .reverse)]))) ?? []
+        var lines: [String] = []
+        if !notebooks.isEmpty {
+            lines.append("Notebooks: " + notebooks.prefix(30).map { "“\($0.title)”" }.joined(separator: ", "))
+        }
+        if !pdfs.isEmpty {
+            lines.append("PDFs: " + pdfs.prefix(30).map { "“\($0.title)”" }.joined(separator: ", "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Where a word or topic comes up: titles, page titles, typed notes and
+    /// the text of PDFs. Handwriting isn't searchable.
+    static func search(_ query: String) async -> String {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, let context = container?.mainContext else { return "Nothing to search for." }
+        let words = query.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { $0.count > 1 }
+        func matches(_ text: String) -> Bool {
+            let lowered = text.lowercased()
+            return lowered.contains(query.lowercased()) || (!words.isEmpty && words.allSatisfy { lowered.contains($0) })
+        }
+        func snippet(_ text: String) -> String {
+            let flat = text.replacingOccurrences(of: "\n", with: " ")
+            guard let range = flat.range(of: words.first ?? query, options: .caseInsensitive) else { return String(flat.prefix(160)) }
+            let start = flat.index(range.lowerBound, offsetBy: -60, limitedBy: flat.startIndex) ?? flat.startIndex
+            let end = flat.index(range.upperBound, offsetBy: 100, limitedBy: flat.endIndex) ?? flat.endIndex
+            return (start > flat.startIndex ? "…" : "") + flat[start..<end] + (end < flat.endIndex ? "…" : "")
+        }
+
+        var found: [String] = []
+        let notebooks = (try? context.fetch(FetchDescriptor<Notebook>())) ?? []
+        for notebook in notebooks {
+            if matches(notebook.title) { found.append("Notebook “\(notebook.title)” (title)") }
+            for page in notebook.sortedPages {
+                let place = "Notebook “\(notebook.title)”, page “\(page.displayTitle(number: page.number))”"
+                if !page.title.isEmpty, matches(page.title) { found.append("\(place) (page title)") }
+                for box in page.textBoxes ?? [] where !box.isDeleted && matches(box.plainText) {
+                    found.append("\(place), typed note: \(snippet(box.plainText))")
+                }
+            }
+        }
+        let pdfs = (try? context.fetch(FetchDescriptor<PDFItem>(sortBy: [SortDescriptor(\.lastOpenedAt, order: .reverse)]))) ?? []
+        var files: [(title: String, url: URL)] = []
+        for pdf in pdfs {
+            if matches(pdf.title) { found.append("PDF “\(pdf.title)” (title)") }
+            for box in pdf.textBoxes ?? [] where !box.isDeleted && matches(box.plainText) {
+                found.append("PDF “\(pdf.title)”, page \((box.pageIndex ?? 0) + 1), their note: \(snippet(box.plainText))")
+            }
+            if files.count < 40 { files.append((pdf.title, FileStore.pdfURL(fileName: pdf.fileName))) }
+        }
+        let phrase = words.max { $0.count < $1.count } ?? query
+        let inPDFs = await Task.detached(priority: .userInitiated) { searchPDFs(files, for: query, fallback: phrase) }.value
+        found += inPDFs
+
+        guard !found.isEmpty else { return "“\(query)” doesn't come up in their titles, typed notes or PDFs. (Handwriting can't be searched.)" }
+        return found.prefix(30).joined(separator: "\n") + (found.count > 30 ? "\n…and \(found.count - 30) more." : "")
+    }
+
+    /// The text of PDFs, searched away from the main thread.
+    private nonisolated static func searchPDFs(_ files: [(title: String, url: URL)], for query: String, fallback: String) -> [String] {
+        var found: [String] = []
+        for file in files {
+            guard let document = PDFDocument(url: file.url), !document.isLocked else { continue }
+            var hits = document.findString(query, withOptions: [.caseInsensitive, .diacriticInsensitive])
+            if hits.isEmpty, fallback != query {
+                hits = document.findString(fallback, withOptions: [.caseInsensitive, .diacriticInsensitive])
+            }
+            for hit in hits.prefix(3) {
+                guard let page = hit.pages.first else { continue }
+                let line = hit.copy() as? PDFSelection
+                line?.extendForLineBoundaries()
+                let text = (line?.string ?? hit.string ?? "").replacingOccurrences(of: "\n", with: " ")
+                found.append("PDF “\(file.title)”, page \(document.index(for: page) + 1): \(String(text.prefix(200)))")
+            }
+        }
+        return found
+    }
+}
+
+// MARK: - Reminders
+
+/// Reminders she sets, as notifications, so they come even when Memor is
+/// closed.
+@MainActor
+enum PalReminders {
+    static func schedule(minutes: Double, message: String) async -> PalTools.Outcome {
+        let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard minutes > 0, minutes <= 60 * 24 * 14, !message.isEmpty else {
+            return .text("Give a time from 1 minute to 2 weeks away, and a message.", isError: true)
+        }
+        let center = UNUserNotificationCenter.current()
+        let allowed = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+        guard allowed else {
+            return .text("Notifications are off for Memor, so you can't remind them. They can turn them on in Settings › Notifications › Memor.", isError: true)
+        }
+        let content = UNMutableNotificationContent()
+        content.title = StudyPalCharacter.name ?? "Your study pal"
+        content.body = message
+        content.sound = .default
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: max(60, minutes * 60), repeats: false)
+        do {
+            try await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: trigger))
+        } catch {
+            return .text("Couldn't set the reminder.", isError: true)
+        }
+        let at = Date.now.addingTimeInterval(minutes * 60).formatted(date: .omitted, time: .shortened)
+        return .text("Set: a notification at \(at) saying “\(message)”.")
+    }
+}
+
+/// Shows her reminders even while Memor is open.
+final class PalNotificationDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
+    static let shared = PalNotificationDelegate()
+
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .list, .sound]
+    }
+}
+
+// MARK: - Downloading pictures
+
+/// Downloads a picture she found, carefully: HTTPS only, no cookies or
+/// cache, at most 15 MB, and only if the server says it's an image.
+enum ImageDownloader {
+    private static let maxBytes = 15_000_000
+
+    private static let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.timeoutIntervalForRequest = 20
+        return URLSession(configuration: configuration)
+    }()
+
+    static func fetch(_ url: URL) async throws -> Data {
+        guard url.scheme?.lowercased() == "https", url.host != nil else {
+            throw OpenAIError.other("Only https image links can be used.")
+        }
+        var request = URLRequest(url: url)
+        request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw OpenAIError.other("The image link didn't work.")
+        }
+        guard (http.mimeType ?? "").hasPrefix("image/") else {
+            throw OpenAIError.other("That link isn't an image file.")
+        }
+        guard data.count <= maxBytes else {
+            throw OpenAIError.other("That image is too large.")
+        }
+        return data
+    }
+}
