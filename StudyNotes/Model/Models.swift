@@ -92,6 +92,8 @@ final class NotebookPage {
     var textBoxes: [TextBox]? = []
     @Relationship(deleteRule: .cascade, inverse: \CanvasImage.page)
     var images: [CanvasImage]? = []
+    @Relationship(deleteRule: .cascade, inverse: \AskThread.notebookPage)
+    var askThreads: [AskThread]? = []
 
     init(sortIndex: Int = 0) {
         self.sortIndex = sortIndex
@@ -192,6 +194,8 @@ final class PDFItem {
     var pageInk: [PageInk]? = []
     @Relationship(deleteRule: .cascade, inverse: \TextBox.pdf)
     var textBoxes: [TextBox]? = []
+    @Relationship(deleteRule: .cascade, inverse: \AskThread.pdf)
+    var askThreads: [AskThread]? = []
 
     init(id: UUID, title: String, fileName: String, pageCount: Int) {
         self.id = id
@@ -276,6 +280,38 @@ final class CanvasImage {
         self.y = frame.origin.y
         self.width = frame.size.width
         self.height = frame.size.height
+        self.imageData = imageData
+    }
+}
+
+/// A saved "circle to ask" chat, shown as a marker where you circled.
+@Model
+final class AskThread {
+    var id: UUID = UUID()
+    var createdAt: Date = Date.now
+    var updatedAt: Date = Date.now
+    /// Where the marker sits: canvas points on a notebook page, or page
+    /// points with a top-left origin on a PDF page.
+    var anchorX: Double = 0
+    var anchorY: Double = 0
+    /// The PDF page, for chats on a PDF.
+    var pageIndex: Int? = nil
+    /// The circled area, as JPEG.
+    @Attribute(.externalStorage) var imageData: Data? = nil
+    /// What the panel shows: a JSON array of `{role, text}`.
+    var transcriptData: Data? = nil
+    /// The API conversation exactly as sent and received, so the chat can go on.
+    @Attribute(.externalStorage) var historyData: Data? = nil
+    var notebookPage: NotebookPage? = nil
+    var pdf: PDFItem? = nil
+
+    var anchor: CGPoint { CGPoint(x: anchorX, y: anchorY) }
+    var hasAnswer: Bool { transcriptData != nil }
+
+    init(anchor: CGPoint, pageIndex: Int? = nil, imageData: Data?) {
+        self.anchorX = anchor.x
+        self.anchorY = anchor.y
+        self.pageIndex = pageIndex
         self.imageData = imageData
     }
 }

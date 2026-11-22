@@ -36,8 +36,18 @@ final class PDFReaderController: UIViewController {
     private var eraserReturn: EraserAutoReturn?
     private var undoTaps: UndoTapGestures?
     /// Gets a picture of the area circled with the Ask tool.
-    var onAskSelection: ((UIImage) -> Void)?
+    var onOpenAskThread: ((AskThread) -> Void)?
+    /// A saved chat was deleted from its marker.
+    var onDeleteAskThread: ((UUID) -> Void)?
     private let askLasso = AskLassoView()
+    /// Markers on the pages that are on screen.
+    private var askMarkers: [UUID: AskMarkerButton] = [:]
+    /// Notes Claude adds land a little apart instead of on top of each other.
+    private var askInsertCount = 0
+    /// The page of the chat that's open, and the top-right corner of its
+    /// circled area (in page points), if any.
+    var askPageIndex: Int?
+    var askAnchor: CGPoint? { didSet { askInsertCount = 0 } }
 
     private lazy var textBoxes = TextBoxCoordinator(modelContext: modelContext, hooks: .init(
         undoManager: { [weak self] in self?.undoManager },
@@ -186,10 +196,87 @@ final class PDFReaderController: UIViewController {
         askLasso.isActive = on
     }
 
+    /// Saves a new chat for the circled area, puts its marker on the page
+    /// and opens it.
     private func finishAsk(in rect: CGRect) {
         guard let image = askLasso.snapshot(of: view, rect: rect) else { return }
         askLasso.isActive = false
-        onAskSelection?(image)
+        let center = view.convert(CGPoint(x: rect.midX, y: rect.midY), to: pdfView)
+        let corner = view.convert(CGPoint(x: rect.maxX, y: rect.minY), to: pdfView)
+        guard let page = pdfView.page(for: center, nearest: true) else { return }
+        let pageIndex = document.index(for: page)
+        let anchor = overlays[pageIndex].map { pdfView.convert(corner, to: $0) } ?? .zero
+        let thread = AskThread(anchor: anchor, pageIndex: pageIndex, imageData: image.jpegData(compressionQuality: 0.85))
+        modelContext.insert(thread)
+        thread.pdf = item
+        try? modelContext.save()
+        showAskMarker(for: thread)
+        askInsertCount = 0
+        onOpenAskThread?(thread)
+    }
+
+    private func showAskMarker(for thread: AskThread) {
+        guard askMarkers[thread.id] == nil, let pageIndex = thread.pageIndex,
+              let overlay = overlays[pageIndex] else { return }
+        let id = thread.id
+        let marker = AskMarkerButton(
+            threadID: id,
+            onOpen: { [weak self] in self?.openAskThread(id) },
+            onDelete: { [weak self] in self?.deleteAskThread(id) },
+            onMove: { [weak self] anchor in self?.moveAskThread(id, to: anchor) }
+        )
+        marker.place(at: thread.anchor)
+        overlay.textLayer.addSubview(marker)
+        askMarkers[id] = marker
+    }
+
+    /// A marker was dragged somewhere else on its page.
+    private func moveAskThread(_ id: UUID, to anchor: CGPoint) {
+        guard let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
+        thread.anchorX = anchor.x
+        thread.anchorY = anchor.y
+        saveAskThreads()
+    }
+
+    private func openAskThread(_ id: UUID) {
+        guard let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) else { return }
+        askInsertCount = 0
+        onOpenAskThread?(thread)
+    }
+
+    /// Removes a saved chat and its marker.
+    func deleteAskThread(_ id: UUID) {
+        askMarkers.removeValue(forKey: id)?.removeFromSuperview()
+        if let thread = item.askThreads?.first(where: { $0.id == id && !$0.isDeleted }) {
+            modelContext.delete(thread)
+            try? modelContext.save()
+        }
+        onDeleteAskThread?(id)
+    }
+
+    func saveAskThreads() {
+        guard isModelAlive else { return }
+        try? modelContext.save()
+    }
+
+    /// The page for Claude: a picture of it, its text and your notes on it.
+    func askPageContext(pageIndex: Int?) -> PageContext {
+        let index = pageIndex ?? editor.currentPageIndex
+        guard let page = document.page(at: index) else { return PageContext(imageData: nil, text: "") }
+        let bounds = page.bounds(for: .cropBox)
+        let scale = min(1568 / max(bounds.width, bounds.height, 1), 3)
+        let picture = page.thumbnail(of: CGSize(width: bounds.width * scale, height: bounds.height * scale), for: .cropBox)
+        var text = "Page \(index + 1) of \(document.pageCount)."
+        if let pageText = page.string?.trimmingCharacters(in: .whitespacesAndNewlines), !pageText.isEmpty {
+            text += "\n\n" + String(pageText.prefix(20_000))
+        }
+        let notes = (item.textBoxes ?? [])
+            .filter { !$0.isDeleted && $0.pageIndex == index && !$0.plainText.isEmpty }
+            .map(\.plainText)
+        if !notes.isEmpty {
+            text += "\n\nThe user's notes on this page:\n" + notes.joined(separator: "\n\n")
+        }
+        return PageContext(imageData: picture.jpegData(compressionQuality: 0.8), text: text)
     }
 
     func setPageSidebarVisible(_ visible: Bool) {
@@ -287,7 +374,11 @@ final class PDFReaderController: UIViewController {
         item.modelContext != nil && !item.isDeleted
     }
 
+    /// Goes up with every change to the PDF's notes and ink, for `askPageVersion`.
+    private var contentVersion = 0
+
     private func scheduleSave() {
+        contentVersion += 1
         saveDebouncer.schedule { [weak self] in self?.save() }
     }
 
@@ -477,7 +568,9 @@ final class PDFReaderController: UIViewController {
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         let location = gesture.location(in: pdfView)
-        if pdfView.hitTest(location, with: nil)?.enclosingTextBox != nil { return }
+        let hit = pdfView.hitTest(location, with: nil)
+        if hit?.enclosingTextBox != nil || hit is UIControl { return }
+        textBoxes.clearSelection()
 
         switch tool {
         case .text:
@@ -526,6 +619,9 @@ extension PDFReaderController: @preconcurrency PDFPageOverlayViewProvider {
         for box in item.textBoxes ?? [] where box.pageIndex == pageIndex && !box.isDeleted {
             textBoxes.showView(for: box)
         }
+        for thread in item.askThreads ?? [] where thread.pageIndex == pageIndex && !thread.isDeleted {
+            showAskMarker(for: thread)
+        }
         return overlay
     }
 
@@ -537,6 +633,9 @@ extension PDFReaderController: @preconcurrency PDFPageOverlayViewProvider {
         }
         textBoxes.forgetViews(in: overlay.textLayer)
         toolPicker.removeObserver(overlay.canvasView)
+        for case let marker as AskMarkerButton in overlay.textLayer.subviews {
+            askMarkers[marker.threadID] = nil
+        }
         if overlays[overlay.pageIndex] === overlay {
             overlays[overlay.pageIndex] = nil
         }
@@ -582,5 +681,114 @@ extension PDFReaderController: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
         // Our tap runs alongside PDFView's own taps (deselecting text etc.).
         gestureRecognizer === tap
+    }
+}
+
+// MARK: - Claude, the study pal
+
+/// On a PDF, Claude works with your typed notes. The PDF itself, your ink
+/// and your highlights stay as they are.
+extension PDFReaderController: AskPageActions {
+    /// The page in view counts too: turning to another page is a new page for her.
+    var askPageVersion: Int { contentVersion &* 100_000 &+ editor.currentPageIndex }
+
+    var canAddImages: Bool { false }
+
+    private var askPage: Int { askPageIndex ?? editor.currentPageIndex }
+
+    private var askPageSize: CGSize {
+        document.page(at: askPage)?.bounds(for: .cropBox).size ?? .zero
+    }
+
+    func askPageItems() -> String {
+        let index = askPage
+        let size = askPageSize
+        let notes: [[String: Any]] = (item.textBoxes ?? [])
+            .filter { !$0.isDeleted && $0.pageIndex == index }
+            .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+            .map { box in
+                [
+                    "id": box.id.uuidString,
+                    "kind": "text",
+                    "x": box.x.rounded(),
+                    "y": box.y.rounded(),
+                    "width": box.width.rounded(),
+                    "height": textBoxes.height(of: box.id).rounded(),
+                    "text": String(box.plainText.prefix(400)),
+                ] as [String: Any]
+            }
+        var description: [String: Any] = [
+            "coordinates": "Points on PDF page \(index + 1), from its top-left corner. x grows to the right, y grows down.",
+            "page_size": ["width": size.width.rounded(), "height": size.height.rounded()],
+            "items": notes,
+            "note": "These are the user's typed notes. The PDF's own text, ink and highlights aren't listed and can't be changed. Images can't be added to a PDF.",
+        ]
+        if let askAnchor {
+            description["circled_area_top_right"] = ["x": askAnchor.x.rounded(), "y": askAnchor.y.rounded()]
+        }
+        return askJSON(description)
+    }
+
+    func askPageNotes() -> String {
+        let index = askPage
+        return (item.textBoxes ?? [])
+            .filter { !$0.isDeleted && $0.pageIndex == index && !$0.plainText.isEmpty }
+            .sorted { ($0.y, $0.x) < ($1.y, $1.x) }
+            .map(\.plainText)
+            .joined(separator: "\n\n")
+    }
+
+    /// Adds a note beside the circled area or near the top of the page.
+    /// The page has to be on screen.
+    func askAddText(_ text: String) -> UUID? {
+        let index = askPage
+        guard overlays[index] != nil else { return nil }
+        let width: CGFloat = 260
+        let offset = CGFloat(askInsertCount) * 36
+        askInsertCount += 1
+        let origin = askAnchor.map { CGPoint(x: $0.x + 12, y: $0.y + offset) } ?? CGPoint(x: 40, y: 60 + offset)
+        return textBoxes.insertBox(at: clamped(origin, width: width), width: width, text: text, pageIndex: index)
+    }
+
+    func askAddImage(_ image: PreparedImage) -> UUID? { nil }
+
+    func askMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
+        guard let box = textBoxes.box(id) else { return Self.unknownNote }
+        let origin = clamped(origin, width: box.width)
+        UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseInOut]) {
+            _ = self.textBoxes.setBoxFrame(id: id, origin: origin)
+        }
+        return nil
+    }
+
+    func askResizeItem(_ id: UUID, width: CGFloat) -> String? {
+        guard let box = textBoxes.box(id) else { return Self.unknownNote }
+        let width = min(width, max(askPageSize.width - box.x, 80))
+        UIView.animate(withDuration: 0.35, delay: 0, options: [.curveEaseInOut]) {
+            _ = self.textBoxes.setBoxFrame(id: id, width: width)
+        }
+        return nil
+    }
+
+    func askEditText(_ id: UUID, text: String) -> String? {
+        textBoxes.replaceText(id: id, with: text) ? nil : Self.unknownNote
+    }
+
+    func askDeleteItem(_ id: UUID) -> String? {
+        guard textBoxes.box(id) != nil else { return Self.unknownNote }
+        textBoxes.removeBox(id: id, undoable: true)
+        return nil
+    }
+
+    private static let unknownNote = "No note with that id. Call get_page_items for the current ids."
+
+    /// Keeps a note on its page.
+    private func clamped(_ origin: CGPoint, width: CGFloat) -> CGPoint {
+        let size = askPageSize
+        guard size.width > 0, size.height > 0 else { return origin }
+        return CGPoint(
+            x: max(8, min(origin.x, size.width - width - 8)),
+            y: max(8, min(origin.y, size.height - 40))
+        )
     }
 }

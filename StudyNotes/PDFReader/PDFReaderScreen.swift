@@ -57,6 +57,9 @@ final class PDFEditor {
     /// Circle-to-ask: the Ask tool is on, and the conversation in the side panel.
     var isAskMode = false
     var askSession: AskSession?
+    /// A part of the page you circled in voice mode, for the study pal to
+    /// talk about.
+    var voiceQuestion: VoiceQuestion?
     @ObservationIgnored weak var controller: PDFReaderController?
 
     func setAskMode(_ on: Bool) {
@@ -64,19 +67,75 @@ final class PDFEditor {
         controller?.setAskMode(on)
     }
 
-    /// Opens the side panel and asks Claude about the circled area.
-    func didCircle(_ image: UIImage) {
-        isAskMode = false
+    /// Opens a chat in the side panel: a new one for an area just circled
+    /// (it asks Claude right away), or a saved one from its marker.
+    func openAskThread(_ thread: AskThread) {
+        setAskMode(false)
+        // In voice mode, a new circled question goes to the study pal to talk
+        // about, and keeps no marker. (A saved chat reopens in the panel.)
+        if !thread.hasAnswer, StudyPalSpeaker.isVoiceMode {
+            controller?.askPageIndex = thread.pageIndex
+            controller?.askAnchor = thread.anchor
+            voiceQuestion = VoiceQuestion(text: "Here's the part of my page I circled. Can you help me with it?", image: thread.imageData)
+            controller?.deleteAskThread(thread.id)
+            return
+        }
         askSession?.cancel()
-        let session = AskSession(image: image)
+        let session = AskSession(thread: thread, surface: .pdf)
+        configure(session, pageIndex: thread.pageIndex, anchor: thread.anchor)
         askSession = session
-        session.start()
+        if !thread.hasAnswer {
+            session.pageContext = controller?.askPageContext(pageIndex: thread.pageIndex)
+            session.start()
+        }
+    }
+
+    /// What the study pal can do in voice mode: on the page you're reading.
+    func voiceActions() -> AskPageActions? {
+        controller?.askPageIndex = currentPageIndex
+        return controller
+    }
+
+    /// A picture of the page you're reading and its notes, for voice mode.
+    func voicePageContext() -> PageContext? { controller?.askPageContext(pageIndex: currentPageIndex) }
+
+    /// A question about the current page from the compose box, typed or
+    /// dictated, with nothing circled: Claude answers in the chat panel.
+    func startCompose(_ question: String) {
+        setAskMode(false)
+        askSession?.cancel()
+        let session = AskSession(image: nil, thread: nil, surface: .pdf)
+        let pageIndex = currentPageIndex
+        configure(session, pageIndex: pageIndex, anchor: nil)
+        session.pageContext = controller?.askPageContext(pageIndex: pageIndex)
+        askSession = session
+        session.ask(question)
+    }
+
+    /// Lets Claude work on the chat's page: new notes go beside the
+    /// circled area, or near the top of the page.
+    private func configure(_ session: AskSession, pageIndex: Int?, anchor: CGPoint?) {
+        session.actions = controller
+        controller?.askPageIndex = pageIndex
+        controller?.askAnchor = anchor
+        session.onSaved = { [weak self] in self?.controller?.saveAskThreads() }
     }
 
     func closeAsk() {
         askSession?.cancel()
+        // A circled chat that never got an answer isn't worth keeping.
+        if let thread = askSession?.thread, !thread.hasAnswer {
+            controller?.deleteAskThread(thread.id)
+        }
         askSession = nil
         setAskMode(false)
+    }
+
+    /// Closes the panel if its chat was deleted from the marker.
+    func askThreadDeleted(_ id: UUID) {
+        guard askSession?.thread?.id == id else { return }
+        askSession?.cancel()
+        askSession = nil
     }
 
     func undo() { controller?.undo() }
@@ -103,19 +162,24 @@ struct PDFReaderScreen: View {
 
     var body: some View {
         content
-            .overlay(alignment: .trailing) {
-                if let session = editor.askSession {
-                    AskPanel(session: session) {
-                        withAnimation(.snappy) { editor.closeAsk() }
-                    }
-                    .padding(.vertical, 12)
-                    .padding(.trailing, 12)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
+            .overlay {
+                AskOverlay(
+                    session: editor.askSession,
+                    isAskMode: editor.isAskMode,
+                    showsPal: document != nil,
+                    voiceQuestion: editor.voiceQuestion,
+                    pageActions: { editor.voiceActions() },
+                    pageContext: { editor.voicePageContext() },
+                    onSummon: { askClaude() },
+                    onSend: { editor.startCompose($0) },
+                    onCancelCompose: { editor.setAskMode(false) },
+                    onClose: { withAnimation(.snappy) { editor.closeAsk() } }
+                )
             }
             .animation(.snappy, value: editor.askSession?.id)
+            .animation(.snappy, value: editor.isAskMode)
             .sheet(isPresented: $showsKeySettings) {
-                APIKeySettingsView { editor.setAskMode(true) }
+                SettingsView { editor.setAskMode(true) }
             }
             .navigationTitle($item.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -175,6 +239,16 @@ struct PDFReaderScreen: View {
         }
     }
 
+    /// Turns on Ask Claude, from the toolbar or the study pal. Without an
+    /// API key, asks for one first.
+    private func askClaude() {
+        if APIKeyStore.hasKey {
+            editor.setAskMode(true)
+        } else {
+            showsKeySettings = true
+        }
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarLeading) {
@@ -209,11 +283,7 @@ struct PDFReaderScreen: View {
                 }
             }
             Toggle(isOn: Binding(get: { editor.isAskMode }, set: { on in
-                if on, !APIKeyStore.hasKey {
-                    showsKeySettings = true
-                } else {
-                    editor.setAskMode(on)
-                }
+                if on { askClaude() } else { editor.setAskMode(false) }
             })) {
                 Label("Ask Claude", systemImage: "sparkles")
             }
@@ -265,7 +335,8 @@ private struct PDFReaderRepresentable: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> PDFReaderController {
         let controller = PDFReaderController(document: document, item: item, editor: editor, modelContext: modelContext)
-        controller.onAskSelection = { [weak editor] image in editor?.didCircle(image) }
+        controller.onOpenAskThread = { [weak editor] thread in editor?.openAskThread(thread) }
+        controller.onDeleteAskThread = { [weak editor] id in editor?.askThreadDeleted(id) }
         editor.controller = controller
         return controller
     }

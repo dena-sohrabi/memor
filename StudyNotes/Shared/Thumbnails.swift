@@ -17,6 +17,46 @@ enum Thumbnails {
         try? image.pngData()?.write(to: FileStore.thumbnailURL(for: id), options: .atomic)
     }
 
+    /// A picture of everything on a notebook page, for Ask Claude: ink,
+    /// images and text on plain paper, at most 1568 pixels on its longest
+    /// side (the size Claude reads images at). Nil for an empty page.
+    @MainActor
+    static func renderPageForAsk(
+        drawing: PKDrawing,
+        textBoxes: [(frame: CGRect, text: NSAttributedString)],
+        images: [(frame: CGRect, image: UIImage)]
+    ) -> UIImage? {
+        var content = drawing.strokes.isEmpty ? CGRect.null : drawing.bounds
+        for box in textBoxes { content = content.union(box.frame) }
+        for image in images { content = content.union(image.frame) }
+        guard !content.isNull, content.width > 0, content.height > 0 else { return nil }
+
+        let frame = content.insetBy(dx: -24, dy: -24)
+        let scale = min(1568 / max(frame.width, frame.height), 2)
+        let size = CGSize(width: (frame.width * scale).rounded(), height: (frame.height * scale).rounded())
+        var inkImage: UIImage?
+        if !drawing.strokes.isEmpty {
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                inkImage = drawing.image(from: frame, scale: scale)
+            }
+        }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let cg = context.cgContext
+            cg.scaleBy(x: scale, y: scale)
+            cg.translateBy(x: -frame.minX, y: -frame.minY)
+            for image in images { image.image.draw(in: image.frame) }
+            inkImage?.draw(in: frame)
+            for box in textBoxes {
+                box.text.draw(with: box.frame.insetBy(dx: 6, dy: 8), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            }
+        }
+    }
+
     /// The thumbnail of a new, empty page: dots only.
     @MainActor
     static func writeBlankNotebookThumbnail(id: UUID) {

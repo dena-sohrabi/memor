@@ -7,6 +7,7 @@ protocol TextBoxViewDelegate: AnyObject {
     func textBoxViewDidEndEditing(_ boxView: TextBoxView)
     func textBoxView(_ boxView: TextBoxView, didMoveFrom oldFrame: CGRect)
     func textBoxViewDidRequestDelete(_ boxView: TextBoxView)
+    func textBoxViewDidRequestSelect(_ boxView: TextBoxView)
 }
 
 /// A text view with its own undo stack. Typing undo stays inside the box, so
@@ -18,11 +19,12 @@ final class BoxTextView: UITextView {
 
 /// A typed text box on a notebook canvas or a PDF page.
 ///
-/// When you're not typing in it, drag it with a finger to move it, or tap
-/// it to edit. While editing, it shows a border, a move handle on the left
-/// and a resize strip on the right edge. Its height follows the text. It
-/// writes position and text straight into its `TextBox` model; the delegate
-/// saves.
+/// Tap it once to select it (a border appears) and then drag it with a
+/// finger to move it; tap it again to type. An unselected box ignores drags,
+/// so the page scrolls as usual, and lets the Pencil write over it. While
+/// editing, it shows a move handle on the left and a resize strip on the
+/// right edge. Its height follows the text. It writes position and text
+/// straight into its `TextBox` model; the delegate saves.
 final class TextBoxView: UIView {
     static let defaultFont = UIFont.systemFont(ofSize: 18)
     private static let minimumWidth: CGFloat = 80
@@ -36,9 +38,16 @@ final class TextBoxView: UIView {
     private let moveHandle = UIImageView(image: UIImage(systemName: "arrow.up.and.down.and.arrow.left.and.right"))
     private let resizeHandle = UIView()
     private let resizeGrip = UIView()
-    /// Moves the whole box with a finger while it isn't being edited.
+    /// Moves the whole box with a finger while it's selected.
     private let dragPan = UIPanGestureRecognizer()
+    /// First tap selects, the next one starts typing.
+    private let selectTap = UITapGestureRecognizer()
+    private var isEditingText = false
     private var frameAtGestureStart: CGRect = .zero
+
+    var isSelected = false {
+        didSet { updateChrome() }
+    }
     private var renderScale: CGFloat = 0
 
     var isEmpty: Bool {
@@ -68,6 +77,8 @@ final class TextBoxView: UIView {
             textView.typingAttributes = [.font: Self.defaultFont, .foregroundColor: UIColor.black]
         }
         textView.delegate = self
+        // Taps go to the box until it's being edited (see `selectTap`).
+        textView.isUserInteractionEnabled = false
         addSubview(textView)
 
         moveHandle.contentMode = .center
@@ -93,14 +104,31 @@ final class TextBoxView: UIView {
         dragPan.addTarget(self, action: #selector(handleMove(_:)))
         addGestureRecognizer(dragPan)
 
-        setEditingChrome(false)
+        selectTap.addTarget(self, action: #selector(handleSelectTap(_:)))
+        addGestureRecognizer(selectTap)
+
+        updateChrome()
         fitHeight()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
-    func beginEditing() {
+    /// Starts typing, with the cursor at `point` (in the text view) if given.
+    func beginEditing(at point: CGPoint? = nil) {
+        textView.isUserInteractionEnabled = true
         textView.becomeFirstResponder()
+        if let point, let position = textView.closestPosition(to: point) {
+            textView.selectedTextRange = textView.textRange(from: position, to: position)
+        }
+    }
+
+    @objc private func handleSelectTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, !isEditingText else { return }
+        if isSelected {
+            beginEditing(at: gesture.location(in: textView))
+        } else {
+            delegate?.textBoxViewDidRequestSelect(self)
+        }
     }
 
     /// Boxes sit inside a zoomed container, so they're scaled like an image.
@@ -119,6 +147,16 @@ final class TextBoxView: UIView {
         apply(to: self)
     }
 
+    /// Shows the model's text again after it was changed from outside.
+    func reloadText() {
+        if let data = model.richText, let text = RichText.decode(data) {
+            textView.attributedText = text
+        } else {
+            textView.text = model.plainText
+        }
+        fitHeight()
+    }
+
     /// Moves or resizes the box (used by undo).
     func apply(origin: CGPoint, width: CGFloat) {
         frame = CGRect(origin: origin, size: CGSize(width: width, height: bounds.height))
@@ -135,8 +173,13 @@ final class TextBoxView: UIView {
         resizeGrip.frame = CGRect(x: 10, y: max(0, bounds.height / 2 - 12), width: 4, height: min(24, bounds.height))
     }
 
-    // The move handle sits outside the box, so widen the touch area while it shows.
+    // The move handle sits outside the box, so widen the touch area while it
+    // shows. A Pencil touching a box that isn't being edited passes through,
+    // so you can write over typed text.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        if !isEditingText, event?.allTouches?.contains(where: { $0.type == .pencil && $0.phase == .began }) == true {
+            return false
+        }
         if !moveHandle.isHidden, moveHandle.frame.insetBy(dx: -8, dy: -8).contains(point) { return true }
         if !resizeHandle.isHidden, resizeHandle.frame.contains(point) { return true }
         return super.point(inside: point, with: event)
@@ -156,12 +199,14 @@ final class TextBoxView: UIView {
         model.width = frame.width
     }
 
-    private func setEditingChrome(_ editing: Bool) {
-        layer.borderWidth = editing ? 1 : 0
-        moveHandle.isHidden = !editing
-        resizeHandle.isHidden = !editing
-        // While editing, a drag selects text; the handle moves the box instead.
-        dragPan.isEnabled = !editing
+    private func updateChrome() {
+        let showsFrame = isEditingText || isSelected
+        layer.borderWidth = showsFrame ? 1.5 : 0
+        moveHandle.isHidden = !isEditingText
+        resizeHandle.isHidden = !showsFrame
+        // Only a selected box moves by dragging. While editing, a drag selects
+        // text and the handle moves the box instead.
+        dragPan.isEnabled = isSelected && !isEditingText
     }
 
     /// A light lift while the box is being dragged.
@@ -224,11 +269,14 @@ extension TextBoxView: UIGestureRecognizerDelegate {
 
 extension TextBoxView: UITextViewDelegate {
     func textViewDidBeginEditing(_ textView: UITextView) {
-        setEditingChrome(true)
+        isEditingText = true
+        updateChrome()
     }
 
     func textViewDidEndEditing(_ textView: UITextView) {
-        setEditingChrome(false)
+        isEditingText = false
+        textView.isUserInteractionEnabled = false
+        isSelected = false
         delegate?.textBoxViewDidEndEditing(self)
     }
 
@@ -276,6 +324,8 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
     private let hooks: Hooks
     private(set) var views: [UUID: TextBoxView] = [:]
     private var newEmptyBoxes: Set<UUID> = []
+    /// The one box that's selected (tapped once), if any.
+    private weak var selectedView: TextBoxView?
 
     /// Pixel density for box contents (zoom × screen scale), so text stays
     /// sharp when the container is zoomed in.
@@ -299,6 +349,11 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
 
     var editingBox: TextBoxView? {
         views.values.first { $0.textView.isFirstResponder }
+    }
+
+    /// A box is selected (tapped once) or being typed in.
+    var hasSelection: Bool {
+        selectedView != nil || editingBox != nil
     }
 
     var allViews: [TextBoxView] { Array(views.values) }
@@ -325,6 +380,7 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
     }
 
     func createBox(at origin: CGPoint, width: CGFloat, pageIndex: Int? = nil, initialText: String? = nil) {
+        clearSelection()
         let box = TextBox(x: origin.x, y: origin.y, width: width, pageIndex: pageIndex)
         modelContext.insert(box)
         hooks.attach(box)
@@ -334,6 +390,97 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
         if let initialText {
             boxView.textView.insertText(initialText)
         }
+    }
+
+    /// Puts a box with ready-made text on the page (from Ask Claude or a
+    /// paste) without starting to type in it, in `font` and `color`. Undo
+    /// removes it.
+    @discardableResult
+    func insertBox(
+        at origin: CGPoint,
+        width: CGFloat,
+        text: String,
+        pageIndex: Int? = nil,
+        font: UIFont = TextBoxView.defaultFont,
+        color: UIColor = .black
+    ) -> UUID? {
+        let box = TextBox(x: origin.x, y: origin.y, width: width, pageIndex: pageIndex)
+        let attributed = NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color,
+        ])
+        box.richText = RichText.encode(attributed)
+        box.plainText = text
+        modelContext.insert(box)
+        hooks.attach(box)
+        guard showView(for: box) != nil else {
+            modelContext.delete(box)
+            return nil
+        }
+        let id = box.id
+        hooks.undoManager()?.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.removeBox(id: id, undoable: true) }
+        }
+        hooks.contentChanged()
+        return id
+    }
+
+    /// The model for a box, whether or not its view is on screen.
+    func box(_ id: UUID) -> TextBox? {
+        guard let box = views[id]?.model ?? hooks.lookup(id), !box.isDeleted else { return nil }
+        return box
+    }
+
+    /// The box's height on screen, or an estimate when its page isn't showing.
+    func height(of id: UUID) -> CGFloat {
+        views[id]?.bounds.height ?? 44
+    }
+
+    /// Moves and/or resizes a box, with undo. Returns false if it's gone.
+    @discardableResult
+    func setBoxFrame(id: UUID, origin: CGPoint? = nil, width: CGFloat? = nil) -> Bool {
+        guard let box = box(id) else { return false }
+        let frame = CGRect(
+            x: origin?.x ?? CGFloat(box.x),
+            y: origin?.y ?? CGFloat(box.y),
+            width: max(80, width ?? CGFloat(box.width)),
+            height: 0
+        )
+        setFrame(frame, forBox: id)
+        return true
+    }
+
+    /// Replaces a box's text, with undo. Returns false if it's gone.
+    @discardableResult
+    func replaceText(id: UUID, with text: String) -> Bool {
+        guard let box = box(id) else { return false }
+        // The new text keeps the look of the old.
+        let old = box.richText.flatMap(RichText.decode)
+        let style = (old?.length ?? 0) > 0 ? old?.attributes(at: 0, effectiveRange: nil) : nil
+        let attributed = NSAttributedString(string: text, attributes: [
+            .font: style?[.font] as? UIFont ?? TextBoxView.defaultFont,
+            .foregroundColor: style?[.foregroundColor] as? UIColor ?? UIColor.black,
+        ])
+        applyText(id: id, richText: RichText.encode(attributed), plainText: text)
+        return true
+    }
+
+    private func applyText(id: UUID, richText: Data?, plainText: String) {
+        guard let box = box(id) else { return }
+        let previousRich = box.richText
+        let previousPlain = box.plainText
+        box.richText = richText
+        box.plainText = plainText
+        views[id]?.reloadText()
+        hooks.undoManager()?.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.applyText(id: id, richText: previousRich, plainText: previousPlain) }
+        }
+        hooks.contentChanged()
+    }
+
+    func clearSelection() {
+        selectedView?.isSelected = false
+        selectedView = nil
     }
 
     func removeBox(id: UUID, undoable: Bool) {
@@ -407,6 +554,13 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
     func textBoxView(_ boxView: TextBoxView, didMoveFrom oldFrame: CGRect) {
         registerFrameUndo(id: boxView.boxID, frame: oldFrame)
         hooks.contentChanged()
+    }
+
+    func textBoxViewDidRequestSelect(_ boxView: TextBoxView) {
+        clearSelection()
+        editingBox?.textView.resignFirstResponder()
+        boxView.isSelected = true
+        selectedView = boxView
     }
 
     func textBoxViewDidRequestDelete(_ boxView: TextBoxView) {

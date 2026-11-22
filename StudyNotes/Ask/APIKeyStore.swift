@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// Keeps the user's Claude API key in the iOS Keychain.
+/// Keeps an API key in the iOS Keychain.
 ///
 /// How the key is protected:
 /// - Stored only in the Keychain, never in the database, files, UserDefaults or logs.
@@ -9,11 +9,11 @@ import Security
 ///   never synced to iCloud Keychain and never included in backups, so it
 ///   can't leave this device.
 /// - Read at the moment a request is made and never kept in app state.
-enum APIKeyStore {
-    private static let service = "com.denasohrabi.memor.claude"
-    private static let account = "anthropic-api-key"
+struct KeychainKey: Sendable {
+    let service: String
+    let account: String
 
-    private static var baseQuery: [String: Any] {
+    private var baseQuery: [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -22,14 +22,14 @@ enum APIKeyStore {
         ]
     }
 
-    static var hasKey: Bool {
+    var hasKey: Bool {
         var query = baseQuery
         query[kSecReturnData as String] = false
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
     /// The saved key, or nil. Call only right before sending a request.
-    static func read() -> String? {
+    func read() -> String? {
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -40,13 +40,13 @@ enum APIKeyStore {
     }
 
     /// A safe hint for showing which key is saved, like "sk-ant-…a1B2".
-    static func maskedHint() -> String? {
+    func maskedHint() -> String? {
         guard let key = read(), key.count > 10 else { return nil }
         return "\(key.prefix(7))…\(key.suffix(4))"
     }
 
     @discardableResult
-    static func save(_ key: String) -> Bool {
+    func save(_ key: String) -> Bool {
         let data = Data(key.utf8)
         delete()
         var item = baseQuery
@@ -55,7 +55,30 @@ enum APIKeyStore {
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
 
-    static func delete() {
+    func delete() {
         SecItemDelete(baseQuery as CFDictionary)
     }
+}
+
+/// The user's Claude API key, for Ask Claude.
+enum APIKeyStore {
+    private static let key = KeychainKey(service: "com.denasohrabi.memor.claude", account: "anthropic-api-key")
+
+    static var hasKey: Bool { key.hasKey }
+    static func read() -> String? { key.read() }
+    static func maskedHint() -> String? { key.maskedHint() }
+    @discardableResult static func save(_ value: String) -> Bool { key.save(value) }
+    static func delete() { key.delete() }
+}
+
+/// The user's OpenAI API key: optional, for the study pal's voice and for
+/// the images Claude draws.
+enum OpenAIKeyStore {
+    private static let key = KeychainKey(service: "com.denasohrabi.memor.openai", account: "openai-api-key")
+
+    static var hasKey: Bool { key.hasKey }
+    static func read() -> String? { key.read() }
+    static func maskedHint() -> String? { key.maskedHint() }
+    @discardableResult static func save(_ value: String) -> Bool { key.save(value) }
+    static func delete() { key.delete() }
 }

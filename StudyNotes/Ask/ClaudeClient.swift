@@ -14,6 +14,9 @@ import Foundation
 @MainActor
 enum ClaudeClient {
     static let model = "claude-opus-5-5"
+    /// For chats you start by talking to the study pal: listed as fast,
+    /// against Opus's moderate, and it can answer without thinking first.
+    static let voiceModel = "claude-sonnet-5-5"
     private static let apiVersion = "2026-10-21"
     /// Opt-in server-side fallback: if a safety classifier declines, the API
     /// retries on a fallback model within the same request.

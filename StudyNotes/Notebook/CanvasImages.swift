@@ -192,6 +192,8 @@ final class CanvasImageCoordinator: NSObject {
     struct Hooks {
         var undoManager: @MainActor () -> UndoManager?
         var contentChanged: @MainActor () -> Void
+        /// Text dropped on the page, at a point in canvas points.
+        var dropText: @MainActor (String, CGPoint) -> Void
     }
 
     private enum DragMode {
@@ -299,6 +301,11 @@ final class CanvasImageCoordinator: NSObject {
         page.images?.first { $0.id == id && !$0.isDeleted }
     }
 
+    /// Whether there's an image at a point, in canvas points.
+    func hasImage(at point: CGPoint) -> Bool {
+        hitImage(at: point) != nil
+    }
+
     private func hitImage(at point: CGPoint) -> CanvasImageView? {
         imageLayer.subviews.reversed()
             .compactMap { $0 as? CanvasImageView }
@@ -329,8 +336,9 @@ final class CanvasImageCoordinator: NSObject {
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended, let canvasView else { return }
-        // Taps on a text box belong to the text box.
-        if canvasView.hitTest(gesture.location(in: canvasView), with: nil)?.enclosingTextBox != nil { return }
+        // Taps on a text box or a marker belong to them.
+        let hit = canvasView.hitTest(gesture.location(in: canvasView), with: nil)
+        if hit?.enclosingTextBox != nil || hit is UIControl { return }
         if let hit = hitImage(at: gesture.location(in: imageLayer)) {
             select(hit.imageID)
         } else {
@@ -406,14 +414,21 @@ final class CanvasImageCoordinator: NSObject {
     func importImage(data: Data, centeredAt center: CGPoint) async {
         let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data) }.value
         guard let prepared, page.modelContext != nil, !page.isDeleted else { return }
-        addImage(prepared, centeredAt: center)
+        add(prepared, centeredAt: center)
     }
 
-    private func addImage(_ prepared: PreparedImage, centeredAt center: CGPoint) {
-        // Images arrive at their @2x point size, shrunk to fit a 400-point square.
+    /// Puts a prepared image on the page, selected, with undo.
+    @discardableResult
+    /// The size a new image gets on the page: its @2x point size, shrunk
+    /// to fit a 400-point square.
+    static func defaultSize(of prepared: PreparedImage) -> CGSize {
         let natural = CGSize(width: max(prepared.pixelSize.width / 2, 1), height: max(prepared.pixelSize.height / 2, 1))
-        let scale = min(1, Self.defaultMaxSide / natural.width, Self.defaultMaxSide / natural.height)
-        let size = CGSize(width: natural.width * scale, height: natural.height * scale)
+        let scale = min(1, defaultMaxSide / natural.width, defaultMaxSide / natural.height)
+        return CGSize(width: natural.width * scale, height: natural.height * scale)
+    }
+
+    func add(_ prepared: PreparedImage, centeredAt center: CGPoint) -> UUID {
+        let size = Self.defaultSize(of: prepared)
         let frame = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
 
         let image = CanvasImage(frame: frame, imageData: prepared.data)
@@ -427,6 +442,57 @@ final class CanvasImageCoordinator: NSObject {
             MainActor.assumeIsolated { target.remove(id) }
         }
         hooks.contentChanged()
+        return id
+    }
+
+    // MARK: Changes asked for by Claude
+
+    /// Every image on the page, for Claude: id, frame and whether it's locked.
+    func describeImages() -> [[String: Any]] {
+        (page.images ?? []).filter { !$0.isDeleted }
+            .sorted { ($0.zIndex, $0.createdAt) < ($1.zIndex, $1.createdAt) }
+            .map { image in
+                [
+                    "id": image.id.uuidString,
+                    "kind": "image",
+                    "x": image.x.rounded(),
+                    "y": image.y.rounded(),
+                    "width": image.width.rounded(),
+                    "height": image.height.rounded(),
+                    "locked": image.isLocked,
+                ] as [String: Any]
+            }
+    }
+
+    func hasImage(_ id: UUID) -> Bool {
+        model(id) != nil
+    }
+
+    /// Why Claude can't change this image, if it can't.
+    func problem(with id: UUID) -> String? {
+        guard let model = model(id) else { return "No image with that id." }
+        return model.isLocked ? "That image is locked. The user can unlock it from its toolbar." : nil
+    }
+
+    /// Moves and/or resizes an image (keeping its shape), with undo.
+    /// Returns nil, or why it couldn't.
+    func changeImage(_ id: UUID, origin: CGPoint? = nil, width: CGFloat? = nil) -> String? {
+        guard let model = model(id) else { return "No image with that id." }
+        guard !model.isLocked else { return "That image is locked. The user can unlock it from its toolbar." }
+        let previous = model.frame
+        let newWidth = max(width ?? previous.width, Self.minimumSide)
+        let newHeight = previous.height * newWidth / max(previous.width, 1)
+        let frame = CGRect(x: origin?.x ?? previous.minX, y: origin?.y ?? previous.minY, width: newWidth, height: newHeight)
+        setFrame(frame, of: id, previous: previous)
+        return nil
+    }
+
+    /// Deletes an image, with undo. Returns nil, or why it couldn't.
+    func deleteImage(_ id: UUID) -> String? {
+        guard let model = model(id) else { return "No image with that id." }
+        guard !model.isLocked else { return "That image is locked. The user can unlock it from its toolbar." }
+        remove(id)
+        return nil
     }
 
     private func remove(_ id: UUID) {
@@ -501,7 +567,7 @@ extension CanvasImageCoordinator: UIGestureRecognizerDelegate {
 
 extension CanvasImageCoordinator: UIDropInteractionDelegate {
     func dropInteraction(_ interaction: UIDropInteraction, canHandle session: UIDropSession) -> Bool {
-        session.hasItemsConforming(toTypeIdentifiers: [UTType.image.identifier])
+        session.hasItemsConforming(toTypeIdentifiers: [UTType.image.identifier, UTType.plainText.identifier])
     }
 
     func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
@@ -512,6 +578,10 @@ extension CanvasImageCoordinator: UIDropInteractionDelegate {
         let point = session.location(in: imageLayer)
         let providers = session.items.map(\.itemProvider)
             .filter { $0.hasItemConformingToTypeIdentifier(UTType.image.identifier) }
+        if providers.isEmpty {
+            dropText(from: session, at: point)
+            return
+        }
         for (index, provider) in providers.enumerated() {
             // Several images land in a small cascade.
             let center = CGPoint(x: point.x + CGFloat(index) * 24, y: point.y + CGFloat(index) * 24)
@@ -519,6 +589,24 @@ extension CanvasImageCoordinator: UIDropInteractionDelegate {
                 guard let data else { return }
                 Task { @MainActor [weak self] in
                     await self?.importImage(data: data, centeredAt: center)
+                }
+            }
+        }
+    }
+}
+
+extension CanvasImageCoordinator {
+    /// Dropped text (for example, selected in the Ask Claude panel) becomes a text box.
+    fileprivate func dropText(from session: UIDropSession, at point: CGPoint) {
+        let providers = session.items.map(\.itemProvider)
+            .filter { $0.hasItemConformingToTypeIdentifier(UTType.plainText.identifier) }
+        for (index, provider) in providers.enumerated() {
+            let spot = CGPoint(x: point.x, y: point.y + CGFloat(index) * 40)
+            _ = provider.loadDataRepresentation(forTypeIdentifier: UTType.plainText.identifier) { [weak self] data, _ in
+                guard let data, let text = String(data: data, encoding: .utf8),
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                Task { @MainActor [weak self] in
+                    self?.hooks.dropText(text, spot)
                 }
             }
         }

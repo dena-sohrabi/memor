@@ -9,8 +9,6 @@ final class AskLassoView: UIView {
 
     private let loop = CAShapeLayer()
     private let path = UIBezierPath()
-    private let hint = UILabel()
-    private let hintPill = UIView()
 
     var isActive = false {
         didSet {
@@ -22,10 +20,11 @@ final class AskLassoView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isHidden = true
-        backgroundColor = UIColor.systemIndigo.withAlphaComponent(0.04)
+        backgroundColor = .clear
         isMultipleTouchEnabled = false
 
-        loop.fillColor = UIColor.systemIndigo.withAlphaComponent(0.08).cgColor
+        // Just an outline, no fill.
+        loop.fillColor = nil
         loop.strokeColor = UIColor.systemIndigo.cgColor
         loop.lineWidth = 3
         loop.lineCap = .round
@@ -35,26 +34,9 @@ final class AskLassoView: UIView {
         loop.shadowRadius = 6
         loop.shadowOffset = .zero
         layer.addSublayer(loop)
-
-        hint.text = "Circle what you want to ask about"
-        hint.font = .systemFont(ofSize: 15, weight: .semibold)
-        hint.textColor = .white
-        hintPill.backgroundColor = UIColor.systemIndigo.withAlphaComponent(0.9)
-        hintPill.isUserInteractionEnabled = false
-        hintPill.addSubview(hint)
-        addSubview(hintPill)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        hint.sizeToFit()
-        hintPill.bounds = CGRect(x: 0, y: 0, width: hint.bounds.width + 32, height: hint.bounds.height + 16)
-        hintPill.layer.cornerRadius = hintPill.bounds.height / 2
-        hint.center = CGPoint(x: hintPill.bounds.midX, y: hintPill.bounds.midY)
-        hintPill.center = CGPoint(x: bounds.midX, y: safeAreaInsets.top + 32)
-    }
 
     // MARK: Drawing the loop
 
@@ -62,7 +44,6 @@ final class AskLassoView: UIView {
         guard let touch = touches.first else { return }
         path.removeAllPoints()
         path.move(to: touch.location(in: self))
-        hintPill.isHidden = true
         updateLoop()
     }
 
@@ -99,7 +80,6 @@ final class AskLassoView: UIView {
     private func clearLoop() {
         path.removeAllPoints()
         loop.path = nil
-        hintPill.isHidden = false
     }
 
     // MARK: Snapshot

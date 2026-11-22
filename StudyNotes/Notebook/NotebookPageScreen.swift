@@ -15,6 +15,32 @@ final class NotebookEditor {
     /// Circle-to-ask: the Ask tool is on, and the conversation in the side panel.
     var isAskMode = false
     var askSession: AskSession?
+    /// A part of the page you circled in voice mode, for the study pal to
+    /// talk about.
+    var voiceQuestion: VoiceQuestion?
+    /// The toolbar and the pen palette are hidden, so the page fills the
+    /// window. A tap on empty paper switches.
+    var hidesChrome = false
+    /// The page's zoom: 1 is 100%.
+    var zoomScale: CGFloat = 1
+    /// Where the pen palette covers the page (null when hidden).
+    var toolPickerFrame = CGRect.null
+
+    /// The zoom control sits at the top left, below the toolbar, unless the
+    /// pen palette is there; then at the bottom left.
+    var zoomCorner: Alignment {
+        toolPickerFrame.intersects(CGRect(x: 0, y: 0, width: 220, height: 90)) ? .bottomLeading : .topLeading
+    }
+
+    func toggleChrome() {
+        hidesChrome.toggle()
+        controller?.setToolPickerVisible(!hidesChrome)
+    }
+
+    func zoomIn() { controller?.zoomIn() }
+    func zoomOut() { controller?.zoomOut() }
+    func zoom(to scale: CGFloat) { controller?.zoom(to: scale) }
+    func zoomToFit() { controller?.zoomToFit() }
 
     func setTextMode(_ on: Bool) {
         if on, isAskMode { setAskMode(false) }
@@ -28,19 +54,69 @@ final class NotebookEditor {
         controller?.setAskMode(on)
     }
 
-    /// Opens the side panel and asks Claude about the circled area.
-    func didCircle(_ image: UIImage) {
-        isAskMode = false
+    /// Opens a chat in the side panel: a new one for an area just circled
+    /// (it asks Claude right away), or a saved one from its marker.
+    func openAskThread(_ thread: AskThread) {
+        setAskMode(false)
+        // In voice mode, a new circled question goes to the study pal to talk
+        // about, and keeps no marker. (A saved chat reopens in the panel.)
+        if !thread.hasAnswer, StudyPalSpeaker.isVoiceMode {
+            controller?.askAnchor = thread.anchor
+            voiceQuestion = VoiceQuestion(text: "Here's the part of my page I circled. Can you help me with it?", image: thread.imageData)
+            controller?.deleteAskThread(thread.id)
+            return
+        }
         askSession?.cancel()
-        let session = AskSession(image: image)
+        let session = AskSession(thread: thread, surface: .notebook)
+        configure(session, anchor: thread.anchor)
         askSession = session
-        session.start()
+        if !thread.hasAnswer {
+            session.pageContext = controller?.askPageContext()
+            session.start()
+        }
+    }
+
+    /// What the study pal can do on this page in voice mode.
+    func voiceActions() -> AskPageActions? { controller }
+
+    /// A picture of the page and its typed notes, for voice mode.
+    func voicePageContext() -> PageContext? { controller?.askPageContext() }
+
+    /// A question about the page from the compose box, typed or dictated,
+    /// with nothing circled: Claude answers in the chat panel.
+    func startCompose(_ question: String) {
+        setAskMode(false)
+        askSession?.cancel()
+        let session = AskSession(image: nil, thread: nil, surface: .notebook)
+        configure(session, anchor: nil)
+        session.pageContext = controller?.askPageContext()
+        askSession = session
+        session.ask(question)
+    }
+
+    /// Lets Claude work on this page: what it adds goes beside the circled
+    /// area, or in view when nothing was circled.
+    private func configure(_ session: AskSession, anchor: CGPoint?) {
+        session.actions = controller
+        controller?.askAnchor = anchor
+        session.onSaved = { [weak self] in self?.controller?.saveAskThreads() }
     }
 
     func closeAsk() {
         askSession?.cancel()
+        // A circled chat that never got an answer isn't worth keeping.
+        if let thread = askSession?.thread, !thread.hasAnswer {
+            controller?.deleteAskThread(thread.id)
+        }
         askSession = nil
         setAskMode(false)
+    }
+
+    /// Closes the panel if its chat was deleted from the marker.
+    func askThreadDeleted(_ id: UUID) {
+        guard askSession?.thread?.id == id else { return }
+        askSession?.cancel()
+        askSession = nil
     }
 
     func undo() { controller?.undo() }
@@ -60,8 +136,6 @@ struct NotebookPageScreen: View {
     @State private var editor = NotebookEditor()
     @State private var pageID: UUID
     @State private var photoItem: PhotosPickerItem?
-    /// Hides the top toolbar so the page fills the window.
-    @State private var hidesToolbar = false
     @State private var showsKeySettings = false
 
     init(notebook: Notebook, page: NotebookPage) {
@@ -81,40 +155,39 @@ struct NotebookPageScreen: View {
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)
-        .overlay(alignment: .topTrailing) {
-            if hidesToolbar {
-                Button {
-                    withAnimation(.snappy) { hidesToolbar = false }
-                } label: {
-                    Label("Show Toolbar", systemImage: "arrow.down.right.and.arrow.up.left")
-                        .labelStyle(.iconOnly)
-                        .padding(4)
-                }
-                .buttonStyle(.glass)
-                .padding(.top, 12)
-                .padding(.trailing, 16)
-                .transition(.opacity)
+        .overlay(alignment: editor.zoomCorner) {
+            if index != nil {
+                ZoomControl(editor: editor)
+                    .padding(16)
             }
         }
-        .overlay(alignment: .trailing) {
-            if let session = editor.askSession {
-                AskPanel(session: session) {
-                    withAnimation(.snappy) { editor.closeAsk() }
-                }
-                .padding(.vertical, 12)
-                .padding(.trailing, 12)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
+        .overlay {
+            AskOverlay(
+                session: editor.askSession,
+                isAskMode: editor.isAskMode,
+                showsPal: index != nil,
+                voiceQuestion: editor.voiceQuestion,
+                pageActions: { editor.voiceActions() },
+                pageContext: { editor.voicePageContext() },
+                onSummon: { askClaude() },
+                onSend: { editor.startCompose($0) },
+                onCancelCompose: { editor.setAskMode(false) },
+                onClose: { withAnimation(.snappy) { editor.closeAsk() } }
+            )
         }
         .animation(.snappy, value: editor.askSession?.id)
+        .animation(.snappy, value: editor.isAskMode)
         .sheet(isPresented: $showsKeySettings) {
-            APIKeySettingsView { editor.setAskMode(true) }
+            SettingsView { editor.setAskMode(true) }
         }
         // Tap the title to rename the page.
         .navigationTitle(index.map { Bindable(pages[$0]).editableTitle } ?? .constant(""))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
-        .toolbar(hidesToolbar ? .hidden : .visible, for: .navigationBar)
+        .toolbar(editor.hidesChrome ? .hidden : .visible, for: .navigationBar)
+        // Hidden means everything: the status bar and the home bar too.
+        .statusBarHidden(editor.hidesChrome)
+        .persistentSystemOverlays(editor.hidesChrome ? .hidden : .automatic)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 LibraryButton()
@@ -131,11 +204,7 @@ struct NotebookPageScreen: View {
                 }
                 .toggleStyle(.button)
                 Toggle(isOn: Binding(get: { editor.isAskMode }, set: { on in
-                    if on, !APIKeyStore.hasKey {
-                        showsKeySettings = true
-                    } else {
-                        editor.setAskMode(on)
-                    }
+                    if on { askClaude() } else { editor.setAskMode(false) }
                 })) {
                     Label("Ask Claude", systemImage: "sparkles")
                 }
@@ -145,11 +214,6 @@ struct NotebookPageScreen: View {
                 }
                 Button { editor.redo() } label: {
                     Label("Redo", systemImage: "arrow.uturn.forward")
-                }
-                Button {
-                    withAnimation(.snappy) { hidesToolbar = true }
-                } label: {
-                    Label("Hide Toolbar", systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
         }
@@ -166,6 +230,16 @@ struct NotebookPageScreen: View {
             }
         }
         .onDisappear { editor.saveNow() }
+    }
+
+    /// Turns on Ask Claude, from the toolbar or the study pal. Without an
+    /// API key, asks for one first.
+    private func askClaude() {
+        if APIKeyStore.hasKey {
+            editor.setAskMode(true)
+        } else {
+            showsKeySettings = true
+        }
     }
 
     private func addPage(after page: NotebookPage?) {
@@ -192,7 +266,14 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
             isTextMode: editor.isTextMode
         )
         controller.onTextModeEnded = { [weak editor] in editor?.isTextMode = false }
-        controller.onAskSelection = { [weak editor] image in editor?.didCircle(image) }
+        controller.showsToolPicker = !editor.hidesChrome
+        controller.onToggleChrome = { [weak editor] in
+            withAnimation(.snappy) { editor?.toggleChrome() }
+        }
+        controller.onZoomChanged = { [weak editor] zoom in editor?.zoomScale = zoom }
+        controller.onToolPickerFrame = { [weak editor] frame in editor?.toolPickerFrame = frame }
+        controller.onOpenAskThread = { [weak editor] thread in editor?.openAskThread(thread) }
+        controller.onDeleteAskThread = { [weak editor] id in editor?.askThreadDeleted(id) }
         editor.controller = controller
         return controller
     }

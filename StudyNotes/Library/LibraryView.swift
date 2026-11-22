@@ -16,7 +16,7 @@ struct LibraryView: View {
     @State private var renameTarget: LibraryItem?
     @State private var renameText = ""
     @State private var deleteTarget: LibraryItem?
-    @State private var showsKeySettings = false
+    @State private var showsSettings = false
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 20, alignment: .top)]
 
@@ -32,9 +32,6 @@ struct LibraryView: View {
                             .buttonStyle(.plain)
                             .contextMenu { menu(for: .notebook(notebook)) }
                         }
-                        AddTile(title: "New notebook", systemImage: "plus", aspectRatio: 4 / 3) {
-                            createNotebook()
-                        }
                     }
 
                     section("PDFs") {
@@ -45,9 +42,6 @@ struct LibraryView: View {
                             .buttonStyle(.plain)
                             .contextMenu { menu(for: .pdf(pdf)) }
                         }
-                        AddTile(title: "Import PDF", systemImage: "square.and.arrow.down", aspectRatio: 3 / 4) {
-                            showsImporter = true
-                        }
                     }
                 }
                 .padding(24)
@@ -55,19 +49,23 @@ struct LibraryView: View {
             .navigationTitle("Memor")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button { showsKeySettings = true } label: {
-                        Label("Ask Claude Settings", systemImage: "sparkles")
+                    Button { showsSettings = true } label: {
+                        Label("Settings", systemImage: "gearshape")
                     }
-                    Button { showsImporter = true } label: {
-                        Label("Import PDF", systemImage: "square.and.arrow.down")
-                    }
-                    Button { createNotebook() } label: {
-                        Label("New notebook", systemImage: "plus")
+                    Menu {
+                        Button { createNotebook() } label: {
+                            Label("New Notebook", systemImage: "book.closed")
+                        }
+                        Button { showsImporter = true } label: {
+                            Label("Import PDF", systemImage: "doc.badge.plus")
+                        }
+                    } label: {
+                        Label("Add", systemImage: "plus")
                     }
                 }
             }
-            .sheet(isPresented: $showsKeySettings) {
-                APIKeySettingsView()
+            .sheet(isPresented: $showsSettings) {
+                SettingsView()
             }
         }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
