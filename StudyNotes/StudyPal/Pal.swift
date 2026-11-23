@@ -6,10 +6,11 @@ import UserNotifications
 /// (`StudyPalSpeaker`), and the state of her chat card.
 ///
 /// - A switch beside her picks Voice or Chat. In Voice mode, talk to her
-///   with voice messages: tap her (or the mic) and talk, and it's sent when
-///   you pause, or hold the mic and let go to send; she says her replies
-///   out loud, and no words show on screen. In Chat mode, she only writes:
-///   a compose box sits beside her, and her replies show in her chat card.
+///   with voice messages: tap her (or the mic) and talk, then tap again to
+///   send. She says her replies out loud, and no words show on screen,
+///   except a short line over her head while she uses a tool ("Creating
+///   an image…"). In Chat mode, she only writes: a compose box sits beside
+///   her, and her replies show in her chat card.
 /// - Or say "Hey" and her name, and what you want.
 /// - Circle something on a page and it goes to her right away, or with the
 ///   voice message you're in the middle of.
@@ -93,6 +94,12 @@ final class Pal {
                 // Once this answer has wound down.
                 Task { self.deliver(next) }
             }
+        }
+        // What she wrote before using a tool ("Drawing it now.") is said
+        // right away, not after the tool, which can take a minute.
+        brain.onPause = { [weak self] text in
+            guard let self, self.speaksReply else { return }
+            self.speaker.feed(text, isComplete: false, isPausing: true)
         }
         listener.onHeard = { [weak self] text in
             self?.send(text, spoken: true)
@@ -201,23 +208,17 @@ final class Pal {
 
     // MARK: Voice messages
 
-    /// You pressed the mic, or tapped her in Voice mode. `holding`: let go
-    /// to send; otherwise it's sent when you pause, or when you tap again.
-    func startRecording(holding: Bool) {
+    /// You tapped the mic, or tapped her in Voice mode: she listens until
+    /// you tap again to send (`finishRecording`), however long you pause.
+    func startRecording() {
         hush()
         // The microphone is yours now, not her name-listening.
         wake.stopNow()
         if isVoiceMode { speaker.warmUp() }
-        listener.start(holding: holding)
+        listener.start()
     }
 
-    /// The press turned out to be a tap: she listens until you pause or
-    /// tap again, or gives up after a while if you say nothing.
-    func recordingBecameTap() {
-        listener.becameTap()
-    }
-
-    /// Done talking: what you said is sent once it's worked out.
+    /// You tapped again: what you said is sent once it's worked out.
     func finishRecording() {
         listener.release()
     }

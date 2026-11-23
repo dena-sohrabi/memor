@@ -6,15 +6,16 @@ import SwiftUI
 /// she's there instead.
 ///
 /// - The switch beside her picks Voice or Chat.
-/// - Voice: no words on screen at all. Tap her (or the mic beside her) and
-///   talk; it's sent when you pause, or tap again to send it right away.
-///   Or hold the mic while you talk and let go. She answers out loud. Tap
-///   her while she talks to hush her. If something goes wrong, a small
-///   "!" shows over her head; tap it to read what.
+/// - Voice: no words on screen, except what she's doing while she uses a
+///   tool ("Creating an image…"), in a line over her head with no
+///   background. Tap her (or the mic beside her) and talk, then tap again
+///   to send. She answers out loud, and before something slow she may say
+///   what she's doing. Tap her while she talks to hush her. If something
+///   goes wrong, a small "!" shows over her head; tap it to read what.
 /// - Chat: a compose box sits beside her, and tapping her puts the cursor
 ///   in it. Send, and her chat card opens with your talk; tap her to close
 ///   it. While the card is closed, a small bubble over her head shows what
-///   she's doing and saying.
+///   she's saying, and the same line as Voice mode what she's doing.
 /// - The first time you tap her, she asks for a name.
 /// - Rub her to scratch her, and carry her anywhere; she keeps her spot.
 struct PalOverlay: View {
@@ -89,6 +90,7 @@ struct PalOverlay: View {
                     compose(layout)
                     modeSwitch(layout)
                     bubble(layout)
+                    statusLine(layout, size: proxy.size)
                     problemButton(layout)
                     choices(in: proxy.size)
                     nameCard(in: proxy.size)
@@ -99,6 +101,7 @@ struct PalOverlay: View {
             .animation(.spring(duration: 0.35, bounce: 0.2), value: showsCard)
             .animation(.spring(duration: 0.35, bounce: 0.2), value: isNaming)
             .animation(.easeInOut(duration: 0.25), value: bubbleText)
+            .animation(.easeInOut(duration: 0.25), value: brain.status)
             .animation(.spring(duration: 0.35, bounce: 0.2), value: voiceProblem?.text)
             .animation(.spring(duration: 0.4, bounce: 0.2), value: isOut)
             .animation(.spring(duration: 0.35, bounce: 0.2), value: pal.isVoiceMode)
@@ -177,7 +180,7 @@ struct PalOverlay: View {
     @ViewBuilder
     private func mic(_ layout: Layout) -> some View {
         if layout.palFits, layout.hasMic {
-            PalMicButton(style: .floating)
+            PalMicButton(style: .floating(cancelBelow: layout.switchAboveMic))
                 .position(layout.micCenter)
                 .animation(.spring(duration: 0.6, bounce: 0.2), value: layout.micCenter)
                 .transition(.scale(scale: 0.6).combined(with: .opacity))
@@ -228,8 +231,9 @@ struct PalOverlay: View {
         }
     }
 
-    /// Chat mode: what she's doing or saying, over her head, while her card
-    /// is closed. Voice mode never shows words.
+    /// Chat mode: what she's hearing or saying, over her head, while her
+    /// card is closed. Voice mode never shows words. What she's doing with
+    /// a tool is the status line instead.
     private var bubbleText: String? {
         guard !pal.isVoiceMode, !showsCard, !isNaming else { return nil }
         if let problem = pal.listener.problem ?? pal.speaker.problem { return problem }
@@ -240,7 +244,7 @@ struct PalOverlay: View {
         if let error = brain.errorText { return error }
         let reply = brain.messages.last { $0.role == .pal }?.text ?? ""
         if brain.isWorking {
-            if let status = brain.status { return status }
+            if brain.status != nil { return nil }
             return reply.isEmpty ? "Hmm…" : MarkdownText.plainText(reply)
         }
         if lingers, !reply.isEmpty {
@@ -263,6 +267,27 @@ struct PalOverlay: View {
             .frame(width: Layout.bubbleWidth, height: room, alignment: layout.bubbleAbove ? .bottom : .top)
             .position(x: layout.bubbleAnchor.x, y: layout.bubbleAbove ? layout.bubbleAnchor.y - room / 2 : layout.bubbleAnchor.y + room / 2)
             .transition(.scale(scale: 0.9, anchor: layout.bubbleAbove ? .bottom : .top).combined(with: .opacity))
+        }
+    }
+
+    /// What she's doing with a tool, over her head, in both modes (her card
+    /// shows its own): one line with no background, like the step updates
+    /// in AI chat apps. Each step fades into the next.
+    @ViewBuilder
+    private func statusLine(_ layout: Layout, size: CGSize) -> some View {
+        if layout.palFits, brain.isWorking, let activity = brain.status, !showsCard, !isNaming {
+            let width = min(Layout.statusWidth, size.width - 24)
+            // Over the "!" when that's showing too.
+            let lift: CGFloat = voiceProblem != nil ? 44 : 0
+            PalStatusLine(activity: activity)
+                .frame(width: width)
+                .position(
+                    x: min(max(layout.palCenter.x, width / 2 + 12), size.width - width / 2 - 12),
+                    y: layout.bubbleAbove ? layout.bubbleAnchor.y - 14 - lift : layout.bubbleAnchor.y + 14 + lift
+                )
+                .allowsHitTesting(false)
+                .id(activity)
+                .transition(.opacity.combined(with: .offset(y: 4)))
         }
     }
 
@@ -362,8 +387,8 @@ struct PalOverlay: View {
     }
 
     /// - While she talks: hushes her.
-    /// - Voice mode: starts a voice message (sent when you pause), or, while
-    ///   she's listening, sends it now.
+    /// - Voice mode: starts a voice message, or, while she's listening,
+    ///   sends it.
     /// - Chat mode: closes her card if it's open; otherwise puts the cursor
     ///   in the compose box beside her.
     private func tapPal() {
@@ -384,7 +409,7 @@ struct PalOverlay: View {
             if pal.listener.isListening {
                 pal.finishRecording()
             } else {
-                pal.startRecording(holding: false)
+                pal.startRecording()
             }
         } else if pal.isPaletteOpen {
             pal.closePalette()
@@ -441,7 +466,8 @@ struct PalOverlay: View {
     ///   switch under it; in Chat mode the switch, with the compose box
     ///   beyond it (in a narrow window, the compose box goes under her, or
     ///   over her head).
-    /// - Over her head: the bubble (Chat mode) or the "!" (Voice mode).
+    /// - Over her head: the bubble (Chat mode) or the "!" (Voice mode), and
+    ///   the status line while she uses a tool.
     fileprivate struct Layout {
         var pal: CGSize
         var palCenter: CGPoint
@@ -449,6 +475,8 @@ struct PalOverlay: View {
         var hasMic: Bool
         var micCenter: CGPoint
         var switchCenter: CGPoint
+        /// No room under the mic, so the switch is over it.
+        var switchAboveMic = false
         var composeWidth: CGFloat
         /// The middle of the compose box's fixed edge: its bottom when it
         /// grows upward, its top when it grows downward.
@@ -469,6 +497,8 @@ struct PalOverlay: View {
         var panelTop: CGFloat
 
         static let bubbleWidth: CGFloat = 360
+        /// Room for the longest status line.
+        static let statusWidth: CGFloat = 320
         /// About six lines.
         static let bubbleMaxHeight: CGFloat = 150
         static let panelWidth: CGFloat = 380
@@ -538,10 +568,13 @@ struct PalOverlay: View {
             let micX = center.x + side + 30 < size.width ? center.x + side : center.x - side
             micCenter = CGPoint(x: micX, y: center.y + pal.height * 0.1)
             // The switch (two 34-point buttons, stacked) goes under the mic,
-            // or over it when there's no room below; without the mic, in its place.
+            // which is as wide as it, or over it when there's no room below;
+            // without the mic, in its place.
             if hasMic {
-                let below = micCenter.y + 27 + 10 + 41
-                switchCenter = CGPoint(x: micX, y: below + 41 < bottom ? below : micCenter.y - 27 - 10 - 41)
+                let micRadius = PalMicButton.floatingSize / 2
+                let below = micCenter.y + micRadius + 10 + 41
+                switchAboveMic = below + 41 >= bottom
+                switchCenter = CGPoint(x: micX, y: switchAboveMic ? micCenter.y - micRadius - 10 - 41 : below)
             } else {
                 switchCenter = micCenter
             }

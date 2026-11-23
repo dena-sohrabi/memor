@@ -8,9 +8,9 @@ import Speech
 ///
 /// Recognition runs on the iPad, in English, so your voice never leaves it
 /// (the microphone dot stays on while she's listening for her name). She
-/// doesn't listen for it while you're holding the mic, while she's talking
-/// (so she doesn't hear herself), or while Memor isn't on screen. Settings
-/// can turn it off (`isEnabledKey`).
+/// doesn't listen for it while you're recording a voice message, while
+/// she's talking (so she doesn't hear herself), or while Memor isn't on
+/// screen. Settings can turn it off (`isEnabledKey`).
 @MainActor
 @Observable
 final class PalWakeListener {

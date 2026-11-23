@@ -19,6 +19,15 @@ struct PalChoice: Identifiable {
     var hasPictures: Bool { options.contains { $0.imageURL != nil } }
 }
 
+/// What she's doing right now, like "Creating an image…", with an SF
+/// Symbol to go with it. No symbol when she's only thinking.
+struct PalActivity: Hashable {
+    let text: String
+    var symbol: String?
+
+    static let thinking = PalActivity(text: "Thinking…")
+}
+
 /// Everything the study pal can do, as tools for her model: look closely
 /// at a page, write by hand, add typed notes and pictures, mark things,
 /// rearrange typed notes and pictures, highlight and read PDFs, search all
@@ -194,39 +203,42 @@ enum PalTools {
         ]
     }
 
-    /// What she's doing, for the chat card, while a tool runs.
-    static func status(for name: String) -> String? {
+    /// What she's doing while a tool runs, for the line over her head and
+    /// her chat card.
+    static func status(for name: String) -> PalActivity? {
         switch name {
-        case "web_search": "Searching the web…"
-        case "look_at": "Looking closely…"
-        case "get_page_items": "Looking at your page…"
-        case "web_fetch": "Reading a web page…"
-        case "erase_handwriting": "Erasing…"
-        case "move_handwriting": "Tidying your page…"
-        case "show_area", "go_to_page", "open_item": "Showing you…"
-        case "undo", "redo": "Undoing…"
-        case "remove_highlight": "Removing a highlight…"
-        case "list_library", "list_pages": "Looking at your library…"
-        case "create_notebook", "add_page": "Making it…"
-        case "rename_item", "rename_page": "Renaming…"
-        case "move_page": "Moving a page…"
-        case "delete_page": "Waiting for you to confirm…"
-        case "set_my_name": "Trying on my new name…"
-        case "write_by_hand": "Writing on your page…"
-        case "add_note": "Adding a note…"
-        case "mark": "Marking your page…"
-        case "move_item", "resize_item": "Moving things around…"
-        case "edit_text": "Editing a note…"
-        case "delete_item": "Removing something…"
-        case "delete_from_library": "Waiting for you to confirm…"
-        case "highlight_text": "Highlighting…"
-        case "read_pages": "Reading…"
-        case "search_notes": "Looking through your notes…"
-        case "offer_choices": "Waiting for you to choose…"
-        case "set_reminder": "Setting a reminder…"
-        case "remember", "recall": "Remembering…"
-        case "add_image_from_web": "Adding a picture…"
-        case "draw_picture": "Drawing a picture…"
+        case "web_search": PalActivity(text: "Searching the web…", symbol: "globe")
+        case "web_fetch": PalActivity(text: "Reading a web page…", symbol: "safari")
+        case "look_at": PalActivity(text: "Looking closely…", symbol: "eye")
+        case "get_page_items": PalActivity(text: "Looking at your page…", symbol: "doc.text.magnifyingglass")
+        case "erase_handwriting": PalActivity(text: "Erasing…", symbol: "eraser")
+        case "move_handwriting": PalActivity(text: "Tidying your page…", symbol: "arrow.up.and.down.and.arrow.left.and.right")
+        case "show_area", "go_to_page", "open_item": PalActivity(text: "Showing you…", symbol: "eye")
+        case "undo": PalActivity(text: "Undoing…", symbol: "arrow.uturn.backward")
+        case "redo": PalActivity(text: "Redoing…", symbol: "arrow.uturn.forward")
+        case "remove_highlight": PalActivity(text: "Removing a highlight…", symbol: "highlighter")
+        case "list_library", "list_pages": PalActivity(text: "Looking at your library…", symbol: "books.vertical")
+        case "create_notebook": PalActivity(text: "Making a notebook…", symbol: "book.closed")
+        case "add_page": PalActivity(text: "Adding a page…", symbol: "doc.badge.plus")
+        case "rename_item", "rename_page": PalActivity(text: "Renaming…", symbol: "character.cursor.ibeam")
+        case "move_page": PalActivity(text: "Moving a page…", symbol: "arrow.up.arrow.down")
+        case "delete_page", "delete_from_library": PalActivity(text: "Waiting for you to confirm…", symbol: "hand.raised")
+        case "set_my_name": PalActivity(text: "Trying on my new name…", symbol: "heart")
+        case "write_by_hand": PalActivity(text: "Writing on your page…", symbol: "pencil.and.scribble")
+        case "add_note": PalActivity(text: "Adding a note…", symbol: "note.text")
+        case "mark": PalActivity(text: "Marking your page…", symbol: "scribble")
+        case "move_item", "resize_item": PalActivity(text: "Moving things around…", symbol: "arrow.up.and.down.and.arrow.left.and.right")
+        case "edit_text": PalActivity(text: "Editing a note…", symbol: "pencil")
+        case "delete_item": PalActivity(text: "Removing something…", symbol: "trash")
+        case "highlight_text": PalActivity(text: "Highlighting…", symbol: "highlighter")
+        case "read_pages": PalActivity(text: "Reading…", symbol: "book")
+        case "search_notes": PalActivity(text: "Looking through your notes…", symbol: "magnifyingglass")
+        case "offer_choices": PalActivity(text: "Waiting for you to choose…", symbol: "hand.tap")
+        case "set_reminder": PalActivity(text: "Setting a reminder…", symbol: "bell")
+        case "remember": PalActivity(text: "Remembering that…", symbol: "brain")
+        case "recall": PalActivity(text: "Thinking back…", symbol: "clock.arrow.circlepath")
+        case "add_image_from_web": PalActivity(text: "Finding a picture…", symbol: "photo.on.rectangle")
+        case "draw_picture": PalActivity(text: "Creating an image…", symbol: "photo")
         default: nil
         }
     }

@@ -9,12 +9,12 @@ import UIKit
 /// so the terms you're studying come out right, and the text is ready the
 /// moment you're done.
 ///
-/// Two ways to talk: hold the mic button while you speak and let go to
-/// send (`start(holding: true)`, then `release()`); a pause doesn't cut you
-/// off while you hold it. Or tap it (or her) and speak: it's sent when you
-/// pause, or when you tap again (`stop()`). A pause is told from how loud
-/// the microphone is next to the room's own quiet, and from new words
-/// still arriving.
+/// Tap the mic (or her) and speak, then tap again to send (`start()`, then
+/// `release()`), like dictation in ChatGPT or Claude. A pause never sends
+/// it, so you can stop and think. Only if you say nothing at all for a
+/// while does she stop listening. Whether you said anything is told from
+/// how loud the microphone is next to the room's own quiet, and from words
+/// arriving.
 @MainActor
 @Observable
 final class StudyPalListener {
@@ -62,13 +62,11 @@ final class StudyPalListener {
     /// Bumped each time listening starts or stops, so late events from an
     /// earlier time don't count.
     @ObservationIgnored private var generation = 0
-    /// You let go (or paused, or tapped again): the microphone's off, and
-    /// the last of the audio is on its way.
+    /// You tapped again: the microphone's off, and the last of the audio
+    /// is on its way.
     @ObservationIgnored private var isEnding = false
-    /// Let go before the microphone was even on.
+    /// Tapped to send before the microphone was even on.
     @ObservationIgnored private var releaseWhenReady = false
-    /// Tapped on rather than held: a pause sends it.
-    @ObservationIgnored private var isTapMode = false
     @ObservationIgnored private var startedAt = ContinuousClock.now
     /// When you last sounded like you were talking, or new words came in.
     @ObservationIgnored private var lastSpeech: ContinuousClock.Instant?
@@ -76,21 +74,18 @@ final class StudyPalListener {
     @ObservationIgnored private var noiseFloor: Float?
     @ObservationIgnored private var audioSeconds: Double = 0
 
-    /// Tapped on: a pause this long after you've said something sends it.
-    /// Long enough that a breath mid-sentence doesn't.
-    private static let pause: Duration = .milliseconds(1_600)
-    /// Tapped on with nothing said, after this long, she gives up.
-    private static let patience: Duration = .seconds(8)
+    /// With nothing said at all after this long, she stops listening (a
+    /// tap by mistake, or you changed your mind).
+    private static let patience: Duration = .seconds(20)
     private static let longest: Duration = .seconds(120)
 
     /// Goes up each time listening ends because you said nothing.
     private(set) var silences = 0
 
-    /// Starts listening. Once you `release()` (or `stop()`, or pause when
-    /// it was tapped on), what you said goes to `heard` and `onHeard`,
-    /// unless you said nothing (then `silences` goes up) or it was
-    /// cancelled.
-    func start(holding: Bool = false) {
+    /// Starts listening. Once you `release()`, what you said goes to
+    /// `heard` and `onHeard`, unless you said nothing (then `silences` goes
+    /// up) or it was cancelled.
+    func start() {
         guard !isListening else { return }
         generation += 1
         let generation = generation
@@ -98,7 +93,6 @@ final class StudyPalListener {
         level = 0
         isEnding = false
         releaseWhenReady = false
-        isTapMode = !holding
         startedAt = .now
         lastSpeech = nil
         noiseFloor = nil
@@ -144,8 +138,8 @@ final class StudyPalListener {
             state = .listening
             if releaseWhenReady {
                 release()
-            } else if isTapMode {
-                watchForPause(generation: generation)
+            } else {
+                watchForSilence(generation: generation)
             }
             Task {
                 try? await Task.sleep(for: Self.longest)
@@ -185,21 +179,6 @@ final class StudyPalListener {
         self.capture = nil
     }
 
-    /// The same as letting go, for a tap.
-    func stop() {
-        release()
-    }
-
-    /// What started as a hold was a tap: from now on a pause sends it, and
-    /// she gives up if you say nothing for a while.
-    func becameTap() {
-        guard isListening, !isEnding else { return }
-        isTapMode = true
-        // Not on yet: the watching starts once the microphone is.
-        guard state == .listening else { return }
-        watchForPause(generation: generation)
-    }
-
     /// Stops without sending anything.
     func cancel() {
         generation += 1
@@ -211,7 +190,6 @@ final class StudyPalListener {
         level = 0
         isEnding = false
         releaseWhenReady = false
-        isTapMode = false
         state = .idle
     }
 
@@ -225,18 +203,19 @@ final class StudyPalListener {
         if level > max(0.3, floor + 0.2) { lastSpeech = .now }
     }
 
-    /// Tapped on: once you've said something and paused, it's sent; with
-    /// nothing said for a while, she gives up.
-    private func watchForPause(generation: Int) {
+    /// With nothing said at all for a while, she stops listening, and
+    /// nothing is sent. Once you've said something, she waits for your
+    /// tap, however long you pause.
+    private func watchForSilence(generation: Int) {
         Task {
             while true {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: .milliseconds(250))
                 guard self.generation == generation, state == .listening, !isEnding else { return }
-                let now = ContinuousClock.now
-                if let lastSpeech {
-                    if now - lastSpeech >= Self.pause { release() }
-                } else if now - startedAt >= Self.patience {
-                    release()
+                if lastSpeech != nil { return }
+                if ContinuousClock.now - startedAt >= Self.patience {
+                    cancel()
+                    silences += 1
+                    return
                 }
             }
         }
@@ -247,10 +226,10 @@ final class StudyPalListener {
     private func complete(_ transcriber: PalTranscriber) {
         generation += 1
         self.transcriber = nil
-        // Held down, it goes even if it sounded quiet: you meant to talk.
-        let saidSomething = lastSpeech != nil || (!isTapMode && audioSeconds >= 0.6)
+        // Tapped to send, it goes even if it sounded quiet: you meant to
+        // talk. (Under a moment of audio was a double tap.)
+        let saidSomething = lastSpeech != nil || audioSeconds >= 0.6
         isEnding = false
-        isTapMode = false
         level = 0
         state = .idle
         guard saidSomething else {

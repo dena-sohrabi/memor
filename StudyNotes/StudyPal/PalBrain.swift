@@ -65,8 +65,8 @@ final class PalBrain {
 
     private(set) var messages: [Message] = []
     private(set) var isWorking = false
-    /// What she's doing right now ("Writing on your page…"), while working.
-    private(set) var status: String?
+    /// What she's doing with a tool right now ("Creating an image…").
+    private(set) var status: PalActivity?
     private(set) var errorText: String?
     private(set) var canRetry = false
     /// Goes up each time she changes a page, so she can be pleased.
@@ -84,6 +84,9 @@ final class PalBrain {
 
     /// Her reply so far as it streams in, and whether it's complete.
     @ObservationIgnored var onReply: ((_ text: String, _ isComplete: Bool) -> Void)?
+    /// She stopped writing to use her tools, with her reply so far, so a
+    /// line like "Drawing it now." can be said before the tools run.
+    @ObservationIgnored var onPause: ((_ text: String) -> Void)?
 
     /// What stays the same for a whole talk.
     private struct Talk {
@@ -489,8 +492,12 @@ final class PalBrain {
             case "response.output_item.added":
                 guard let item = event["item"] as? [String: Any] else { return }
                 switch item["type"] as? String {
-                case "function_call": self?.status = PalTools.status(for: item["name"] as? String ?? "")
-                case "web_search_call": self?.status = PalTools.status(for: "web_search")
+                case "function_call":
+                    self?.status = PalTools.status(for: item["name"] as? String ?? "")
+                    self?.pausedForTools()
+                case "web_search_call":
+                    self?.status = PalTools.status(for: "web_search")
+                    self?.pausedForTools()
                 case "message":
                     // A second message in the same response starts a new paragraph.
                     if !text.isEmpty { text += "\n\n" }
@@ -578,7 +585,9 @@ final class PalBrain {
                 guard let index = event["index"] as? Int, let block = event["content_block"] as? [String: Any] else { return }
                 blocks[index] = block
                 switch block["type"] as? String {
-                case "tool_use", "server_tool_use": self?.status = PalTools.status(for: block["name"] as? String ?? "")
+                case "tool_use", "server_tool_use":
+                    self?.status = PalTools.status(for: block["name"] as? String ?? "")
+                    self?.pausedForTools()
                 case "text": self?.status = nil
                 default: break
                 }
@@ -757,6 +766,13 @@ final class PalBrain {
         guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
         messages[index].text = text
         onReply?(text, false)
+    }
+
+    /// She stopped writing to use a tool: what she wrote so far can be
+    /// said now, rather than after the tool, which can take a minute.
+    private func pausedForTools() {
+        guard isWorking, let last = messages.last, last.role == .pal else { return }
+        onPause?(last.text)
     }
 
     private static func joined(_ earlier: String, _ text: String) -> String {

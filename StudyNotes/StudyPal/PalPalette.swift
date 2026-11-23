@@ -2,7 +2,8 @@ import SwiftUI
 
 /// The study pal's chat card (Chat mode only): your talk with her, what you
 /// circled, a few things to ask, and a field to type in, with the mic and
-/// the circle tool beside it. It grows with the talk, up to `maxHeight`.
+/// the circle tool beside it. While she works, a line says what she's
+/// doing ("Creating an image…"). It grows with the talk, up to `maxHeight`.
 /// Drag it by its top.
 struct PalPalette: View {
     let maxHeight: CGFloat
@@ -123,7 +124,7 @@ struct PalPalette: View {
                     }
 
                     if brain.isWorking, !brain.isAnswering {
-                        Text(brain.status ?? "Thinking…").foregroundStyle(.secondary)
+                        PalStatusLine(activity: brain.status ?? .thinking, hasHalo: false)
                     }
 
                     if let errorText = brain.errorText {
@@ -359,118 +360,104 @@ private struct PalMessageView: View {
     }
 }
 
-/// The voice-message button. Tap it and talk: it's sent when you pause,
-/// or when you tap it again. Or hold it while you talk and let go to send
-/// (slide away first to cancel). Beside her, a small ✕ over it drops a
-/// tapped-on message instead. No words: what's happening shows in the
-/// button itself.
+/// The voice-message button. Tap it and talk, then tap it again to send,
+/// like dictation in ChatGPT or Claude: a pause never sends it. While
+/// she listens it turns green with a send arrow, swelling with your voice,
+/// and a small ✕ beside it drops the message instead. No words: what's
+/// happening shows in the button itself.
 struct PalMicButton: View {
     enum Style {
-        /// In her card, beside the text field.
+        /// In her card, beside the text field. The ✕ goes before it.
         case inline
-        /// On its own, beside her.
-        case floating
+        /// On its own, beside her, as wide as the Voice/Chat switch. The ✕
+        /// goes over it, or under it when the switch is over it.
+        case floating(cancelBelow: Bool)
     }
 
     let style: Style
 
-    /// When the finger went down on it.
-    @State private var pressedAt: Date?
-    /// She was already listening when this press began, so letting go
-    /// sends what you said.
-    @State private var sendsOnRelease = false
-    @State private var willCancel = false
+    /// As wide as the Voice/Chat switch: two 34-point buttons in 4 points
+    /// of padding.
+    static let floatingSize: CGFloat = 42
 
     private var listener: StudyPalListener { Pal.shared.listener }
 
-    /// Shorter than this is a tap, not a hold.
-    private static let tapLength: TimeInterval = 0.35
+    private var isFloating: Bool {
+        if case .floating = style { return true }
+        return false
+    }
 
     var body: some View {
         let listening = listener.isListening
-        let level = CGFloat(listener.level)
-        let isHolding = pressedAt != nil && !sendsOnRelease
-        Image(systemName: willCancel ? "xmark" : (listening ? "waveform" : "mic.fill"))
-            .font(.system(size: style == .floating ? 22 : 20, weight: .semibold))
-            .symbolEffect(.variableColor.iterative, isActive: listening && !willCancel)
-            .foregroundStyle(listening ? (willCancel ? Color.red : Color.white) : (style == .floating ? Color.primary : Color.secondary))
-            .frame(width: style == .floating ? 54 : 32, height: style == .floating ? 54 : 36)
-            .background {
-                if style == .floating || listening {
-                    Circle()
-                        .fill(listening ? (willCancel ? Color.red.opacity(0.18) : Color.green) : Color.clear)
-                        .scaleEffect(listening ? 1 + level * 0.25 : 1)
-                        .animation(.easeOut(duration: 0.12), value: level)
+        switch style {
+        case .inline:
+            HStack(spacing: 2) {
+                if listening {
+                    cancelButton(size: 32, glass: false)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
                 }
-            }
-            .glassEffect(style == .floating ? .regular.interactive() : .identity, in: .circle)
-            .contentShape(.circle)
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { pressing($0) }
-                    .onEnded { released($0) }
-            )
-            .onChange(of: listening) { _, listening in
-                // She stopped on her own (or was cancelled).
-                if !listening, pressedAt == nil { willCancel = false }
-            }
-            .accessibilityElement()
-            .accessibilityLabel(listening ? "Send Voice Message" : "Talk")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction {
-                if listener.isListening { Pal.shared.finishRecording() } else { Pal.shared.startRecording(holding: false) }
-            }
-            .overlay(alignment: .top) {
-                // Tapped on (not held): a way to drop it instead of sending.
-                if style == .floating, listening, !isHolding {
-                    Button { Pal.shared.cancelRecording() } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 32, height: 32)
-                            .glassEffect(.regular.interactive(), in: .circle)
-                            .contentShape(.circle)
-                    }
-                    .buttonStyle(.plain)
-                    .offset(y: -44)
-                    .accessibilityLabel("Cancel Voice Message")
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
-                }
+                button(listening: listening)
             }
             .animation(.snappy, value: listening)
-            .animation(.snappy, value: isHolding)
-    }
-
-    private func pressing(_ value: DragGesture.Value) {
-        if pressedAt == nil {
-            pressedAt = .now
-            willCancel = false
-            // Already listening (tapped on, here or on her): this press sends.
-            sendsOnRelease = listener.isListening
-            if !sendsOnRelease { Pal.shared.startRecording(holding: true) }
-        }
-        if !sendsOnRelease {
-            willCancel = hypot(value.translation.width, value.translation.height) > 90
+        case .floating(let cancelBelow):
+            button(listening: listening)
+                .overlay(alignment: cancelBelow ? .bottom : .top) {
+                    if listening {
+                        cancelButton(size: 32, glass: true)
+                            .offset(y: cancelBelow ? 32 + 8 : -(32 + 8))
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
+                }
+                .animation(.snappy, value: listening)
         }
     }
 
-    private func released(_ value: DragGesture.Value) {
-        guard let pressedAt else { return }
-        let sends = sendsOnRelease
-        let cancels = willCancel
-        self.pressedAt = nil
-        sendsOnRelease = false
-        willCancel = false
-        if sends {
-            Pal.shared.finishRecording()
-        } else if cancels {
-            Pal.shared.cancelRecording()
-        } else if Date.now.timeIntervalSince(pressedAt) < Self.tapLength {
-            // A tap: she keeps listening, and sends when you pause.
-            Pal.shared.recordingBecameTap()
-        } else {
-            Pal.shared.finishRecording()
+    private func button(listening: Bool) -> some View {
+        let level = CGFloat(listener.level)
+        let size: CGSize = isFloating ? CGSize(width: Self.floatingSize, height: Self.floatingSize) : CGSize(width: 32, height: 36)
+        let circle = isFloating ? Self.floatingSize : 30
+        return Button {
+            if listener.isListening { Pal.shared.finishRecording() } else { Pal.shared.startRecording() }
+        } label: {
+            Image(systemName: listening ? "arrow.up" : "mic.fill")
+                .font(.system(size: isFloating ? 18 : (listening ? 15 : 20), weight: listening ? .bold : .semibold))
+                .contentTransition(.symbolEffect(.replace))
+                .foregroundStyle(listening ? Color.white : (isFloating ? Color.primary : Color.secondary))
+                .frame(width: size.width, height: size.height)
+                .background {
+                    if listening {
+                        ZStack {
+                            // Swells with your voice.
+                            Circle()
+                                .fill(Color.green.opacity(0.3))
+                                .frame(width: circle, height: circle)
+                                .scaleEffect(1 + level * 0.45)
+                                .animation(.easeOut(duration: 0.12), value: level)
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: circle, height: circle)
+                        }
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    }
+                }
+                .glassEffect(isFloating && !listening ? .regular.interactive() : .identity, in: .circle)
+                .contentShape(.circle)
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(listening ? "Send Voice Message" : "Talk")
+    }
+
+    private func cancelButton(size: CGFloat, glass: Bool) -> some View {
+        Button { Pal.shared.cancelRecording() } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.secondary)
+                .frame(width: size, height: size)
+                .glassEffect(glass ? .regular.interactive() : .identity, in: .circle)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Cancel Voice Message")
     }
 }
 

@@ -69,6 +69,9 @@ final class StudyPalSpeaker {
     @ObservationIgnored private var handed = 0
     @ObservationIgnored private var isOnAnswer = false
     @ObservationIgnored private var answerIsComplete = false
+    /// Her answer stopped while she uses a tool, which can take a minute:
+    /// once she's said what she has, she's quiet, not talking.
+    @ObservationIgnored private var isWaitingOnTools = false
 
     @ObservationIgnored private let engine = AVAudioEngine()
     @ObservationIgnored private let player = AVAudioPlayerNode()
@@ -104,6 +107,7 @@ final class StudyPalSpeaker {
         problem = nil
         isOnAnswer = true
         answerIsComplete = false
+        isWaitingOnTools = false
         handed = 0
         waiting = ""
         askedAt = .now
@@ -120,6 +124,7 @@ final class StudyPalSpeaker {
         problem = nil
         isOnAnswer = true
         answerIsComplete = true
+        isWaitingOnTools = false
         handed = 0
         waiting = text
         askedAt = nil
@@ -130,9 +135,11 @@ final class StudyPalSpeaker {
 
     /// Hands her the answer so far. She starts at its first natural break,
     /// then says each sentence once it's complete, and the rest once the
-    /// answer is.
-    func feed(_ markdown: String, isComplete: Bool) {
+    /// answer is. `isPausing`: the writing stopped while a tool runs, so
+    /// she says all of it now ("Drawing it now."), finished sentence or not.
+    func feed(_ markdown: String, isComplete: Bool, isPausing: Bool = false) {
         guard isOnAnswer else { return }
+        isWaitingOnTools = isPausing
         if !loggedFirstText, !markdown.isEmpty, let askedAt {
             loggedFirstText = true
             Self.log.notice("First answer text after \(Self.seconds(since: askedAt), privacy: .public)s")
@@ -140,7 +147,7 @@ final class StudyPalSpeaker {
         if markdown.count > handed {
             let rest = markdown.dropFirst(handed)
             let soonest = handed == 0 ? Self.firstBreak(in: rest) : nil
-            if let end = isComplete ? rest.endIndex : Self.lastSentenceEnd(in: rest) ?? soonest, end > rest.startIndex {
+            if let end = isComplete || isPausing ? rest.endIndex : Self.lastSentenceEnd(in: rest) ?? soonest, end > rest.startIndex {
                 let chunk = String(rest[..<end])
                 handed += chunk.count
                 let text = Self.spoken(chunk)
@@ -271,6 +278,9 @@ final class StudyPalSpeaker {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(120))
                 let quiet = !isResponding && waiting.isEmpty && buffers.isEmpty
+                // Until the answer goes on, she looks like she's working;
+                // her next words make her talk again.
+                if quiet, isWaitingOnTools, isTalking { isTalking = false }
                 if quiet, answerIsComplete || !isOnAnswer {
                     if isOnAnswer, countsAsAnswer { finishedAnswers += 1 }
                     isTalking = false
