@@ -601,13 +601,13 @@ enum PalLibrary {
             }
         }
         let pdfs = (try? context.fetch(FetchDescriptor<PDFItem>(sortBy: [SortDescriptor(\.lastOpenedAt, order: .reverse)]))) ?? []
-        var files: [(title: String, url: URL)] = []
+        var files: [(title: String, id: UUID, fileName: String)] = []
         for pdf in pdfs {
             if matches(pdf.title) { found.append("PDF “\(pdf.title)” (title)") }
             for box in pdf.textBoxes ?? [] where !box.isDeleted && matches(box.plainText) {
                 found.append("PDF “\(pdf.title)”, page \((box.pageIndex ?? 0) + 1), their note: \(snippet(box.plainText))")
             }
-            if files.count < 40 { files.append((pdf.title, FileStore.pdfURL(fileName: pdf.fileName))) }
+            if files.count < 40 { files.append((pdf.title, pdf.id, pdf.fileName)) }
         }
         let phrase = words.max { $0.count < $1.count } ?? query
         let inPDFs = await Task.detached(priority: .userInitiated) { searchPDFs(files, for: query, fallback: phrase) }.value
@@ -618,10 +618,11 @@ enum PalLibrary {
     }
 
     /// The text of PDFs, searched away from the main thread.
-    private nonisolated static func searchPDFs(_ files: [(title: String, url: URL)], for query: String, fallback: String) -> [String] {
+    private nonisolated static func searchPDFs(_ files: [(title: String, id: UUID, fileName: String)], for query: String, fallback: String) -> [String] {
         var found: [String] = []
         for file in files {
-            guard let document = PDFDocument(url: file.url), !document.isLocked else { continue }
+            guard let url = PDFFiles.localURL(id: file.id, fileName: file.fileName),
+                  let document = PDFDocument(url: url), !document.isLocked else { continue }
             var hits = document.findString(query, withOptions: [.caseInsensitive, .diacriticInsensitive])
             if hits.isEmpty, fallback != query {
                 hits = document.findString(fallback, withOptions: [.caseInsensitive, .diacriticInsensitive])

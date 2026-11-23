@@ -6,7 +6,10 @@ struct StudyNotesApp: App {
     private let container: ModelContainer
 
     init() {
-        container = Persistence.makeContainer()
+        container = Persistence.container
+        // Settings from iCloud first, so the study pal starts with them.
+        CloudSettings.start()
+        PDFFiles.storeMissingFiles()
         // The study pal searches your notes, and shows her reminders.
         PalLibrary.container = container
         _ = Pal.shared

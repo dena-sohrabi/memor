@@ -168,6 +168,7 @@ struct LibraryView: View {
                 do {
                     let imported = try await Task.detached { try PDFImporter.importFile(at: url) }.value
                     let item = PDFItem(id: imported.id, title: imported.title, fileName: imported.fileName, pageCount: imported.pageCount)
+                    item.fileData = imported.data
                     modelContext.insert(item)
                     try? modelContext.save()
                     if openAfterImport { open(.pdf(item.id)) }

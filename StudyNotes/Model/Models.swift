@@ -2,9 +2,10 @@ import CoreGraphics
 import Foundation
 import SwiftData
 
-// Every stored property has a default value and every relationship is
-// optional. Those are SwiftData's CloudKit rules, so iCloud sync can be
-// turned on later without a migration.
+// Every stored property has a default value, every relationship is optional
+// and nothing is unique. Those are SwiftData's CloudKit rules: the library
+// syncs through iCloud (see `Persistence`), so keep to them when adding
+// models or properties.
 
 /// Where a notebook was scrolled to, so it reopens at the same spot.
 struct Viewport: Codable, Hashable, Sendable {
@@ -179,8 +180,14 @@ extension Notebook {
 final class PDFItem {
     var id: UUID = UUID()
     var title: String = ""
-    /// File name inside `FileStore.pdfDirectory`. The file is never modified.
+    /// File name of this iPad's copy, inside `FileStore.pdfDirectory`. The
+    /// file is never modified.
     var fileName: String = ""
+    /// The PDF file itself, kept in the database so it syncs through iCloud
+    /// with everything else. PDFKit reads the copy on disk, which `PDFFiles`
+    /// writes from here when it's missing (on a new iPad, say). Nil only for
+    /// PDFs imported before sync, until `PDFFiles.storeMissingFiles` runs.
+    @Attribute(.externalStorage) var fileData: Data? = nil
     var pageCount: Int = 0
     var importedAt: Date = Date.now
     /// Last annotation change.

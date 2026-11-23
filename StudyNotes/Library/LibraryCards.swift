@@ -9,7 +9,9 @@ struct NotebookCard: View {
             Color.clear
                 .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay {
-                    ThumbnailView(id: notebook.coverPageID, version: notebook.modifiedAt, placeholderSymbol: "scribble")
+                    ThumbnailView(id: notebook.coverPageID, version: notebook.modifiedAt, placeholderSymbol: "scribble") {
+                        notebook.sortedPages.first.map { Thumbnails.rebuild($0) }
+                    }
                 }
                 .clipShape(.rect(cornerRadius: 12))
                 .overlay {
@@ -96,6 +98,9 @@ struct ThumbnailView: View {
     let version: Date
     var pdfFileName: String? = nil
     let placeholderSymbol: String
+    /// For notebook pages: draws the thumbnail when the cached one is missing
+    /// or older than `version`, as after an edit synced from another iPad.
+    var rebuild: (@MainActor () -> UIImage?)? = nil
 
     private struct LoadKey: Hashable {
         let id: UUID
@@ -119,9 +124,15 @@ struct ThumbnailView: View {
         }
         .task(id: LoadKey(id: id, version: version)) {
             let id = id
-            let fileName = pdfFileName
-            let data = await Task.detached { Thumbnails.loadData(id: id, pdfFileName: fileName) }.value
-            image = data.flatMap { UIImage(data: $0) }
+            if let rebuild {
+                let editedAt = version
+                let data = await Task.detached { Thumbnails.cachedData(id: id, editedAt: editedAt) }.value
+                image = data.flatMap { UIImage(data: $0) } ?? rebuild()
+            } else {
+                let fileName = pdfFileName
+                let data = await Task.detached { Thumbnails.loadData(id: id, pdfFileName: fileName) }.value
+                image = data.flatMap { UIImage(data: $0) }
+            }
         }
     }
 }

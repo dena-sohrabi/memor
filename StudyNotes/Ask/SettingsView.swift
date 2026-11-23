@@ -371,7 +371,7 @@ private struct MemoryPage: View {
             Section {
                 Toggle("Remember Our Talks", isOn: $remembers)
             } footer: {
-                Text("She writes down what's worth remembering as you talk: about you and how you like her to be, which goes with every talk; about each notebook and PDF, which goes along only while it's open; and a line about each talk, which she looks up only when it helps. It all stays on this iPad. Swipe to delete anything.")
+                Text("She writes down what's worth remembering as you talk: about you and how you like her to be, which goes with every talk; about each notebook and PDF, which goes along only while it's open; and a line about each talk, which she looks up only when it helps. It's kept in your iCloud, so it's the same on all your iPads. Swipe to delete anything.")
             }
 
             if store.isEmpty {
@@ -449,7 +449,10 @@ private struct PrivacyPage: View {
     var body: some View {
         Form {
             Section("Stays on Your iPad") {
-                Text("Your notebooks, pages, PDFs and handwriting. Your API key, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her memory, which you can read and delete in Settings → Memory. Her reminders, which are notifications on this iPad.")
+                Text("Your API keys, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her reminders, which are notifications on this iPad.")
+            }
+            Section("Kept in Your iCloud") {
+                Text("Your notebooks, pages, PDFs, handwriting, typed notes and chats with her. Her memory, which you can read and delete in Settings → Memory, her name and your settings. They're saved to your own iCloud, never to a Memor server, so they're on all your iPads and come back if you reinstall Memor.")
             }
             Section("Sent to Her Mind (Anthropic or OpenAI), When You Message Her") {
                 Text("Your message as text, pictures of the pages on your screen and their text, what you circled or selected, what she remembers about you and those notes, and what she finds when she searches your notes for you. When a talk pauses, the same company's small model writes down what she should remember from it.")

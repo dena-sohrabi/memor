@@ -57,6 +57,49 @@ enum Thumbnails {
         }
     }
 
+    /// A notebook page's cached thumbnail, or nil when it's missing or was
+    /// drawn before `editedAt`: on a new iPad, or after an edit synced from
+    /// another one, since only the iPad you write on draws thumbnails as you
+    /// go. Blocking: call it off the main thread.
+    static func cachedData(id: UUID, editedAt: Date) -> Data? {
+        let url = FileStore.thumbnailURL(for: id)
+        // Saving a page draws its thumbnail just before it stamps the edit,
+        // hence the leeway.
+        guard let drawnAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+              drawnAt >= editedAt.addingTimeInterval(-2) else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    /// Draws a notebook page's thumbnail from what's saved, caches it and
+    /// returns it, for when `cachedData` has none. Text boxes get the height
+    /// their text needs, as on the page.
+    @MainActor
+    @discardableResult
+    static func rebuild(_ page: NotebookPage) -> UIImage {
+        let drawing = page.drawingData.flatMap { try? PKDrawing(data: $0) } ?? PKDrawing()
+        let boxes = (page.textBoxes ?? []).filter { !$0.isDeleted }.compactMap { box -> (frame: CGRect, text: NSAttributedString)? in
+            let text = box.richText.flatMap(RichText.decode)
+                ?? NSAttributedString(string: box.plainText, attributes: [.font: TextBoxView.defaultFont, .foregroundColor: UIColor.black])
+            guard text.length > 0 else { return nil }
+            let fitting = text.boundingRect(
+                with: CGSize(width: max(box.width - 12, 1), height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+            return (frame: CGRect(x: box.x, y: box.y, width: box.width, height: max(44, ceil(fitting.height) + 16)), text: text)
+        }
+        let images = (page.images ?? [])
+            .filter { !$0.isDeleted }
+            .sorted { $0.zIndex < $1.zIndex }
+            .compactMap { image -> (frame: CGRect, image: UIImage)? in
+                guard let data = image.imageData, let picture = UIImage(data: data) else { return nil }
+                return (frame: image.frame, image: picture)
+            }
+        let image = renderNotebook(drawing: drawing, textBoxes: boxes, images: images)
+        try? image.pngData()?.write(to: FileStore.thumbnailURL(for: page.id), options: .atomic)
+        return image
+    }
+
     /// The thumbnail of a new, empty page: dots only.
     @MainActor
     static func writeBlankNotebookThumbnail(id: UUID) {
@@ -134,14 +177,15 @@ enum Thumbnails {
         }
     }
 
-    /// PNG data for a cached thumbnail. If the cache was purged, PDF
-    /// thumbnails are rebuilt from the file. Blocking: call it off the main
-    /// thread.
+    /// PNG data for a cached thumbnail. If the cache was purged, or this is
+    /// a new iPad, PDF thumbnails are rebuilt from the file. Blocking: call
+    /// it off the main thread.
     static func loadData(id: UUID, pdfFileName: String?) -> Data? {
         let url = FileStore.thumbnailURL(for: id)
         if let data = try? Data(contentsOf: url) { return data }
         guard let pdfFileName,
-              let document = PDFDocument(url: FileStore.pdfURL(fileName: pdfFileName)),
+              let fileURL = PDFFiles.localURL(id: id, fileName: pdfFileName),
+              let document = PDFDocument(url: fileURL),
               let page = document.page(at: 0) else { return nil }
         let data = page.thumbnail(of: PDFImporter.thumbnailSize, for: .cropBox).pngData()
         if let data { try? data.write(to: url, options: .atomic) }

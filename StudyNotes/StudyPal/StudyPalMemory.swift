@@ -10,8 +10,9 @@ import os
 /// - Your past talks: a line or two each. Never part of a talk on their
 ///   own; she looks them up (`recall`) when something calls for it.
 ///
-/// Kept only on this iPad. Settings → Memory shows all of it, and can
-/// forget any of it or turn remembering off.
+/// Kept on the iPad and in your iCloud key-value storage, so it's the same
+/// on all your iPads and comes back after a reinstall. Settings → Memory
+/// shows all of it, and can forget any of it or turn remembering off.
 struct PalMemory: Codable, Equatable {
     struct Note: Codable, Equatable, Identifiable {
         enum Kind: String, Codable {
@@ -93,7 +94,8 @@ struct PalLine: Equatable {
     let text: String
 }
 
-/// The study pal's memory, saved in a file in the app's own storage.
+/// The study pal's memory, saved in a file in the app's own storage and in
+/// iCloud key-value storage. The newest save, from any iPad, wins.
 @MainActor
 @Observable
 final class PalMemoryStore {
@@ -102,6 +104,9 @@ final class PalMemoryStore {
     /// The setting for remembering talks; on unless turned off.
     nonisolated static let isOnKey = "studyPal.remembers"
 
+    /// Her memory's key in iCloud key-value storage.
+    nonisolated static let cloudKey = "studyPal.memory"
+
     nonisolated static var isOn: Bool {
         UserDefaults.standard.object(forKey: isOnKey) as? Bool ?? true
     }
@@ -109,7 +114,19 @@ final class PalMemoryStore {
     private(set) var memory: PalMemory
 
     private init() {
-        memory = Self.load()
+        let fromCloud = NSUbiquitousKeyValueStore.default.data(forKey: Self.cloudKey).flatMap(Self.decode)
+        memory = fromCloud ?? Self.loadFile() ?? PalMemory()
+        // Memory from before iCloud goes up the first time.
+        if fromCloud == nil, memory != PalMemory() { save() }
+
+        // Saved on another iPad, or iCloud's first download on this one.
+        _ = NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: NSUbiquitousKeyValueStore.default,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncWithCloud() }
+        }
     }
 
     var aboutNotes: [PalMemory.Note] { memory.notes.filter { $0.kind == .about } }
@@ -259,17 +276,47 @@ final class PalMemoryStore {
         URL.applicationSupportDirectory.appending(path: "StudyPal/memory.json")
     }
 
-    private static func load() -> PalMemory {
-        guard let data = try? Data(contentsOf: fileURL),
-              let memory = try? JSONDecoder().decode(PalMemory.self, from: data) else { return PalMemory() }
-        return memory
+    /// iCloud key-value storage holds 1 MB in all, and the settings need a
+    /// little of it.
+    private static let cloudLimit = 900_000
+
+    private nonisolated static func decode(_ data: Data) -> PalMemory? {
+        try? JSONDecoder().decode(PalMemory.self, from: data)
+    }
+
+    private static func loadFile() -> PalMemory? {
+        (try? Data(contentsOf: fileURL)).flatMap(decode)
+    }
+
+    private func syncWithCloud() {
+        if let data = NSUbiquitousKeyValueStore.default.data(forKey: Self.cloudKey), let fromCloud = Self.decode(data) {
+            guard fromCloud != memory else { return }
+            memory = fromCloud
+            writeFile(data)
+        } else if memory != PalMemory() {
+            // iCloud has none: iCloud drops what's saved before its first
+            // download on an iPad, so save it again.
+            save()
+        }
     }
 
     private func save() {
+        guard let data = try? JSONEncoder().encode(memory) else {
+            PalMemoryWriter.log.error("Couldn't save the study pal's memory.")
+            return
+        }
+        writeFile(data)
+        if data.count <= Self.cloudLimit {
+            NSUbiquitousKeyValueStore.default.set(data, forKey: Self.cloudKey)
+        } else {
+            PalMemoryWriter.log.error("The study pal's memory is too big for iCloud, so it's saved only on this iPad.")
+        }
+    }
+
+    private func writeFile(_ data: Data) {
         let url = Self.fileURL
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try JSONEncoder().encode(memory)
             try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         } catch {
             PalMemoryWriter.log.error("Couldn't save the study pal's memory.")

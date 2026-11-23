@@ -80,6 +80,8 @@ struct PDFReaderScreen: View {
     @State private var document: PDFDocument?
     @State private var lockedDocument: PDFDocument?
     @State private var loadFailed = false
+    /// The file hasn't come from iCloud yet.
+    @State private var fileIsMissing = false
     @State private var asksForPassword = false
     @State private var passwordWasWrong = false
     @State private var password = ""
@@ -97,7 +99,7 @@ struct PDFReaderScreen: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarRole(.editor)
             .toolbar { toolbarContent }
-            .task { loadDocument() }
+            .task { await loadDocument() }
             .onChange(of: editor.tool) { _, tool in
                 editor.controller?.apply(tool: tool)
             }
@@ -138,6 +140,12 @@ struct PDFReaderScreen: View {
         if let document {
             PDFReaderRepresentable(document: document, item: item, editor: editor, modelContext: modelContext)
                 .ignoresSafeArea(.container, edges: .bottom)
+        } else if fileIsMissing {
+            ContentUnavailableView(
+                "This PDF isn't on this iPad yet",
+                systemImage: "icloud.and.arrow.down",
+                description: Text("It comes through iCloud from the iPad it was imported on. Open Memor there, with iCloud on.")
+            )
         } else if loadFailed {
             ContentUnavailableView(
                 "Couldn't open this PDF",
@@ -205,10 +213,18 @@ struct PDFReaderScreen: View {
         }
     }
 
-    private func loadDocument() {
-        guard document == nil, lockedDocument == nil, !loadFailed else { return }
+    private func loadDocument() async {
+        guard document == nil, lockedDocument == nil, !loadFailed, !fileIsMissing else { return }
         item.lastOpenedAt = .now
-        guard let loaded = PDFDocument(url: FileStore.pdfURL(fileName: item.fileName)) else {
+        // On a new iPad the file is written from the database first.
+        let id = item.id
+        let fileName = item.fileName
+        guard let url = await Task.detached(operation: { PDFFiles.localURL(id: id, fileName: fileName) }).value else {
+            fileIsMissing = true
+            return
+        }
+        guard document == nil, lockedDocument == nil else { return }
+        guard let loaded = PDFDocument(url: url) else {
             loadFailed = true
             return
         }

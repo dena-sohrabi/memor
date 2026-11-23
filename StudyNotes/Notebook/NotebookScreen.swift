@@ -178,7 +178,9 @@ private struct NotebookPageCard: View {
             Color.clear
                 .aspectRatio(4 / 3, contentMode: .fit)
                 .overlay {
-                    ThumbnailView(id: page.id, version: page.modifiedAt, placeholderSymbol: "scribble")
+                    ThumbnailView(id: page.id, version: page.modifiedAt, placeholderSymbol: "scribble") {
+                        Thumbnails.rebuild(page)
+                    }
                 }
                 .clipShape(.rect(cornerRadius: 12))
                 .overlay {
