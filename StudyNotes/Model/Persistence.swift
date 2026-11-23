@@ -24,16 +24,22 @@ enum Persistence {
     private static func makeContainer() -> ModelContainer {
         let schema = Schema(modelTypes)
         let synced = ModelConfiguration(schema: schema, cloudKitDatabase: .private(cloudContainerID))
+        // Same database file without iCloud.
+        let local = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
         #if DEBUG
-        initializeCloudKitSchemaIfAsked(storeURL: synced.url)
+        if UserDefaults.standard.bool(forKey: "InitCloudKitSchema") {
+            initializeCloudKitSchema()
+            // The library stays off iCloud for this launch, so your notes
+            // aren't copied to Development, which only debug builds use.
+            if let container = try? ModelContainer(for: schema, configurations: [local]) { return container }
+        }
         #endif
         do {
             return try ModelContainer(for: schema, configurations: [synced])
         } catch {
-            // Same database file without iCloud, so the library still opens.
+            // The library still opens, just without iCloud.
             log.error("iCloud sync is off: \(String(describing: error), privacy: .public)")
         }
-        let local = ModelConfiguration(schema: schema, cloudKitDatabase: .none)
         do {
             return try ModelContainer(for: schema, configurations: [local])
         } catch {
@@ -53,15 +59,19 @@ extension Persistence {
     /// at once: launch a debug build signed in to iCloud with the argument
     /// `-InitCloudKitSchema YES`, then deploy the schema to Production in
     /// the CloudKit Console. Apple's recommended way; it uploads a sample
-    /// record of each type and deletes it again.
-    fileprivate static func initializeCloudKitSchemaIfAsked(storeURL: URL) {
-        guard UserDefaults.standard.bool(forKey: "InitCloudKitSchema") else { return }
+    /// record of each type and deletes it again. It uses an empty, throwaway
+    /// store, so the library isn't touched.
+    fileprivate static func initializeCloudKitSchema() {
         guard let model = NSManagedObjectModel.makeManagedObjectModel(for: modelTypes) else {
             log.error("CloudKit schema: couldn't make the model.")
             return
         }
+        let storeURL = URL.temporaryDirectory.appending(path: "CloudKitSchema.store")
+        let storeFiles = ["", "-shm", "-wal"].map { URL(filePath: storeURL.path(percentEncoded: false) + $0) }
+        storeFiles.forEach { try? FileManager.default.removeItem(at: $0) }
+        defer { storeFiles.forEach { try? FileManager.default.removeItem(at: $0) } }
         do {
-            // Let go of this container before SwiftData opens the store.
+            // Let go of this container before the library opens.
             try autoreleasepool {
                 let description = NSPersistentStoreDescription(url: storeURL)
                 description.cloudKitContainerOptions = NSPersistentCloudKitContainerOptions(containerIdentifier: cloudContainerID)
