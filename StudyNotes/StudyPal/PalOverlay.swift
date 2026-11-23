@@ -5,15 +5,17 @@ import SwiftUI
 /// used last, so there's always exactly one of her. Use another window and
 /// she's there instead.
 ///
-/// - Tap her to open or close her chat card (the first time, she asks for
-///   a name); in Chat mode it opens ready to type. Tap her while she talks
-///   to hush her.
-/// - The switch beside her picks Voice (she talks back, listens for her
-///   name, and the mic is there) or Chat (she only writes).
-/// - The mic beside her sends voice messages: hold it while you talk and
-///   let go, or tap, talk and tap again. Slide away while holding to cancel.
-/// - While her card is closed, a bubble over her head shows what she's
-///   doing and what she says.
+/// - The switch beside her picks Voice or Chat.
+/// - Voice: no words on screen at all. Tap her (or the mic beside her) and
+///   talk; it's sent when you pause, or tap again to send it right away.
+///   Or hold the mic while you talk and let go. She answers out loud. Tap
+///   her while she talks to hush her. If something goes wrong, a small
+///   "!" shows over her head; tap it to read what.
+/// - Chat: a compose box sits beside her, and tapping her puts the cursor
+///   in it. Send, and her chat card opens with your talk; tap her to close
+///   it. While the card is closed, a small bubble over her head shows what
+///   she's doing and saying.
+/// - The first time you tap her, she asks for a name.
 /// - Rub her to scratch her, and carry her anywhere; she keeps her spot.
 struct PalOverlay: View {
     @Environment(\.scenePhase) private var scenePhase
@@ -47,6 +49,9 @@ struct PalOverlay: View {
 
     private var isOut: Bool { isHere }
 
+    /// Her chat card is showing: Chat mode only.
+    private var showsCard: Bool { pal.isPaletteOpen && !pal.isVoiceMode }
+
     var body: some View {
         reacting(to: stage)
             .background {
@@ -69,8 +74,9 @@ struct PalOverlay: View {
                 size: proxy.size,
                 safeTop: proxy.safeAreaInsets.top,
                 bottomInset: proxy.safeAreaInsets.bottom,
-                isPaletteOpen: pal.isPaletteOpen,
-                hasMic: pal.isVoiceMode && pal.hasKey,
+                isVoice: pal.isVoiceMode,
+                isPaletteOpen: showsCard,
+                hasKey: pal.hasKey,
                 seat: CGPoint(x: seatX, y: seatY),
                 panelOffset: CGSize(width: panelX, height: panelY)
             )
@@ -80,17 +86,20 @@ struct PalOverlay: View {
                     listeningGlow(layout)
                     perch(layout, size: proxy.size)
                     mic(layout)
+                    compose(layout)
                     modeSwitch(layout)
                     bubble(layout)
+                    problemButton(layout)
                     choices(in: proxy.size)
                     nameCard(in: proxy.size)
                 }
             }
             .coordinateSpace(.named(StudyPalPerch.space))
             .animation(.spring(duration: 0.35, bounce: 0.2), value: brain.pendingChoice?.id)
-            .animation(.spring(duration: 0.35, bounce: 0.2), value: pal.isPaletteOpen)
+            .animation(.spring(duration: 0.35, bounce: 0.2), value: showsCard)
             .animation(.spring(duration: 0.35, bounce: 0.2), value: isNaming)
             .animation(.easeInOut(duration: 0.25), value: bubbleText)
+            .animation(.spring(duration: 0.35, bounce: 0.2), value: voiceProblem?.text)
             .animation(.spring(duration: 0.4, bounce: 0.2), value: isOut)
             .animation(.spring(duration: 0.35, bounce: 0.2), value: pal.isVoiceMode)
         }
@@ -130,9 +139,9 @@ struct PalOverlay: View {
 
     @ViewBuilder
     private func palette(_ layout: Layout, size: CGSize) -> some View {
-        if pal.isPaletteOpen {
+        if showsCard {
             PalPalette(
-                maxHeight: size.height - layout.panelTop - 16 - layout.panelOffset.height,
+                maxHeight: min(size.height - layout.panelTop - 16 - layout.panelOffset.height, Layout.panelMaxHeight(in: size)),
                 onMove: { panelDrag = $0 },
                 onMoveEnded: { movePanel(by: $0, in: size, safeTop: layout.panelTop) },
                 onNeedsKey: { showsSettings = true }
@@ -175,6 +184,23 @@ struct PalOverlay: View {
         }
     }
 
+    /// Chat mode: the box to write to her, beside her, while her card is
+    /// closed. It grows a line at a time, away from its fixed edge.
+    @ViewBuilder
+    private func compose(_ layout: Layout) -> some View {
+        if layout.palFits, !pal.isVoiceMode, !showsCard {
+            let room = Layout.composeRoom
+            PalComposeBar(width: layout.composeWidth, onNeedsKey: { showsSettings = true })
+                .frame(width: layout.composeWidth, height: room, alignment: layout.composeGrowsUp ? .bottom : .top)
+                .position(
+                    x: layout.composeEdge.x,
+                    y: layout.composeGrowsUp ? layout.composeEdge.y - room / 2 : layout.composeEdge.y + room / 2
+                )
+                .animation(.spring(duration: 0.6, bounce: 0.2), value: layout.composeEdge)
+                .transition(.scale(scale: 0.9, anchor: layout.composeAnchor).combined(with: .opacity))
+        }
+    }
+
     /// Voice or Chat, beside her (under the mic in Voice mode).
     @ViewBuilder
     private func modeSwitch(_ layout: Layout) -> some View {
@@ -202,13 +228,11 @@ struct PalOverlay: View {
         }
     }
 
-    /// What she's doing or saying, over her head, while her card is closed.
+    /// Chat mode: what she's doing or saying, over her head, while her card
+    /// is closed. Voice mode never shows words.
     private var bubbleText: String? {
-        guard !pal.isPaletteOpen, !isNaming else { return nil }
+        guard !pal.isVoiceMode, !showsCard, !isNaming else { return nil }
         if let problem = pal.listener.problem ?? pal.speaker.problem { return problem }
-        if pal.wake.state == .capturing {
-            return pal.wake.command.isEmpty ? "I'm listening…" : pal.wake.command
-        }
         if pal.listener.isListening {
             let heard = pal.listener.transcript
             return heard.isEmpty ? "I'm listening…" : heard
@@ -219,20 +243,19 @@ struct PalOverlay: View {
             if let status = brain.status { return status }
             return reply.isEmpty ? "Hmm…" : MarkdownText.plainText(reply)
         }
-        if pal.speaker.isTalking || lingers, !reply.isEmpty {
+        if lingers, !reply.isEmpty {
             return MarkdownText.plainText(reply)
         }
         return nil
     }
 
-    /// The bubble grows with what's in it (all of what you're saying, or
-    /// her whole reply), from just over her head upward (or below her, near
-    /// the top of the window). Too long for the room there, it scrolls,
-    /// keeping the newest words in view.
+    /// The bubble grows with what's in it, from just over her head upward
+    /// (or below her, near the top of the window), up to a few lines; past
+    /// that it scrolls, keeping the newest words in view. Tap it for her card.
     @ViewBuilder
     private func bubble(_ layout: Layout) -> some View {
         if layout.palFits, let bubbleText {
-            let room = layout.bubbleRoom
+            let room = min(layout.bubbleRoom, Layout.bubbleMaxHeight)
             PalBubble(text: bubbleText, maxHeight: room) {
                 if pal.listener.problem != nil { pal.cancelRecording() }
                 pal.openPalette()
@@ -240,6 +263,51 @@ struct PalOverlay: View {
             .frame(width: Layout.bubbleWidth, height: room, alignment: layout.bubbleAbove ? .bottom : .top)
             .position(x: layout.bubbleAnchor.x, y: layout.bubbleAbove ? layout.bubbleAnchor.y - room / 2 : layout.bubbleAnchor.y + room / 2)
             .transition(.scale(scale: 0.9, anchor: layout.bubbleAbove ? .bottom : .top).combined(with: .opacity))
+        }
+    }
+
+    /// Something that went wrong, for Voice mode, where no words show.
+    private struct Problem {
+        let text: String
+        var actionTitle: String?
+        var action: (() -> Void)?
+    }
+
+    private var voiceProblem: Problem? {
+        guard pal.isVoiceMode, !isNaming else { return nil }
+        if let text = pal.listener.problem ?? pal.speaker.problem {
+            return Problem(text: text)
+        }
+        if let error = brain.errorText {
+            return brain.canRetry ? Problem(text: error, actionTitle: "Try Again", action: { pal.retry() }) : Problem(text: error)
+        }
+        if pal.hasKey, !pal.speaker.isAvailable {
+            // Otherwise she'd answer in silence, with nothing to read.
+            return Problem(
+                text: "I can't talk out loud: my voice needs an OpenAI key, and it has to be turned on in Settings. Switch to Chat to read my answers.",
+                actionTitle: "Open Settings",
+                action: { showsSettings = true }
+            )
+        }
+        return nil
+    }
+
+    /// Voice mode: a small "!" over her head when something went wrong.
+    /// Tap it to read what.
+    @ViewBuilder
+    private func problemButton(_ layout: Layout) -> some View {
+        if layout.palFits, let problem = voiceProblem {
+            PalProblemButton(
+                text: problem.text,
+                actionTitle: problem.actionTitle,
+                action: problem.action,
+                onDismiss: {
+                    // A microphone problem goes once it's been read.
+                    if pal.listener.problem != nil { pal.cancelRecording() }
+                }
+            )
+            .position(layout.problemCenter)
+            .transition(.scale(scale: 0.6).combined(with: .opacity))
         }
     }
 
@@ -267,13 +335,13 @@ struct PalOverlay: View {
                     palName = name
                     isNaming = false
                     play(.delight)
-                    pal.openPalette()
+                    if !pal.isVoiceMode { pal.startTyping() }
                 },
                 onLater: {
                     nameAsked = true
                     isNaming = false
                     play(.nod)
-                    pal.openPalette()
+                    if !pal.isVoiceMode { pal.startTyping() }
                 }
             )
             .position(x: size.width / 2, y: size.height * 0.3)
@@ -285,18 +353,25 @@ struct PalOverlay: View {
 
     private var mood: StudyPalMood {
         if pal.speaker.isTalking { return .talking }
+        // What you said is still being turned into text: she's on it.
+        if pal.listener.isTranscribing || pal.wake.isTranscribing { return .thinking }
         guard brain.isWorking, brain.pendingChoice == nil else { return .idle }
         // A reply she'll say out loud: she thinks until her voice starts.
         let willSpeak = pal.isVoiceMode && pal.speaker.isAvailable
         return brain.isAnswering && !willSpeak ? .talking : .thinking
     }
 
+    /// - While she talks: hushes her.
+    /// - Voice mode: starts a voice message (sent when you pause), or, while
+    ///   she's listening, sends it now.
+    /// - Chat mode: closes her card if it's open; otherwise puts the cursor
+    ///   in the compose box beside her.
     private func tapPal() {
         guard pal.hasKey else {
             showsSettings = true
             return
         }
-        if palName.trimmingCharacters(in: .whitespaces).isEmpty, !nameAsked, !pal.isPaletteOpen {
+        if palName.trimmingCharacters(in: .whitespaces).isEmpty, !nameAsked, !showsCard {
             if !isNaming { play(.wave) }
             isNaming = true
             return
@@ -305,14 +380,16 @@ struct PalOverlay: View {
         if pal.speaker.isTalking {
             pal.hush()
             play(.poke)
+        } else if pal.isVoiceMode {
+            if pal.listener.isListening {
+                pal.finishRecording()
+            } else {
+                pal.startRecording(holding: false)
+            }
         } else if pal.isPaletteOpen {
             pal.closePalette()
             play(.nod)
-        } else if pal.isVoiceMode {
-            pal.openPalette()
-            play(.wave)
         } else {
-            // Chat mode: her card opens, ready to type.
             pal.startTyping()
             play(.listen)
         }
@@ -357,10 +434,14 @@ struct PalOverlay: View {
 
     /// Where everything goes.
     /// - She sits at her spot, kept on screen and above the keyboard.
-    /// - Her card is where you put it (at first, the top right, below the
-    ///   toolbar). If she's under it, she moves just clear of it.
-    /// - The mic is past her wing tip (in Voice mode), the Voice/Chat switch
-    ///   under it (or in its place), and the bubble over her head.
+    /// - Her card (Chat mode) is where you put it (at first, the top right,
+    ///   below the toolbar), no taller than about half the window. If she's
+    ///   under it, she moves just clear of it.
+    /// - Past her wing tip: in Voice mode the mic, with the Voice/Chat
+    ///   switch under it; in Chat mode the switch, with the compose box
+    ///   beyond it (in a narrow window, the compose box goes under her, or
+    ///   over her head).
+    /// - Over her head: the bubble (Chat mode) or the "!" (Voice mode).
     fileprivate struct Layout {
         var pal: CGSize
         var palCenter: CGPoint
@@ -368,20 +449,39 @@ struct PalOverlay: View {
         var hasMic: Bool
         var micCenter: CGPoint
         var switchCenter: CGPoint
+        var composeWidth: CGFloat
+        /// The middle of the compose box's fixed edge: its bottom when it
+        /// grows upward, its top when it grows downward.
+        var composeEdge: CGPoint
+        var composeGrowsUp: Bool
+        /// Where it grows out from, nearest her.
+        var composeAnchor: UnitPoint
+        var problemCenter: CGPoint
         /// Where the bubble starts: the middle of its bottom edge, just over
         /// her head (or of its top edge, just under her).
         var bubbleAnchor: CGPoint
         var bubbleAbove: Bool
         /// How tall the bubble can grow there.
         var bubbleRoom: CGFloat
-
-        static let bubbleWidth: CGFloat = 360
         /// How far the card is from the top-right corner, kept on screen.
         var panelOffset: CGSize
         /// Where the card's top is when it hasn't been moved: below the toolbar.
         var panelTop: CGFloat
 
+        static let bubbleWidth: CGFloat = 360
+        /// About six lines.
+        static let bubbleMaxHeight: CGFloat = 150
         static let panelWidth: CGFloat = 380
+        static let composeMaxWidth: CGFloat = 420
+        /// The compose box with one line.
+        static let composeHeight: CGFloat = 46
+        /// Room for it to grow to four lines.
+        static let composeRoom: CGFloat = 130
+
+        /// Her card is never taller than about half the window.
+        static func panelMaxHeight(in size: CGSize) -> CGFloat {
+            max(420, size.height * 0.5)
+        }
 
         /// Keeps a moved card on screen: all of it across, and its top
         /// (where you drag it) within reach.
@@ -394,8 +494,8 @@ struct PalOverlay: View {
             )
         }
 
-        init(size: CGSize, safeTop: CGFloat, bottomInset: CGFloat, isPaletteOpen: Bool, hasMic: Bool, seat share: CGPoint, panelOffset: CGSize) {
-            self.hasMic = hasMic
+        init(size: CGSize, safeTop: CGFloat, bottomInset: CGFloat, isVoice: Bool, isPaletteOpen: Bool, hasKey: Bool, seat share: CGPoint, panelOffset: CGSize) {
+            hasMic = isVoice && hasKey
             let roomy = size.width >= 760
             let pal = roomy ? CGSize(width: 260, height: 186) : CGSize(width: 190, height: 136)
             self.pal = pal
@@ -421,7 +521,7 @@ struct PalOverlay: View {
                     x: size.width - 12 - Self.panelWidth + self.panelOffset.width,
                     y: panelTop + self.panelOffset.height,
                     width: Self.panelWidth,
-                    height: size.height
+                    height: Self.panelMaxHeight(in: size)
                 )
                 let body = CGRect(x: seat.x - reach, y: seat.y - pal.height * 0.3, width: reach * 2, height: pal.height * 0.6)
                 if body.intersects(panel) {
@@ -448,20 +548,58 @@ struct PalOverlay: View {
 
             let overHead = center.y - pal.height * 0.42
             let underFeet = center.y + pal.height * 0.42
-            let roomAbove = overHead - (safeTop + 8)
-            let roomBelow = bottom - underFeet - 8
+
+            // Chat mode's compose box: past the switch, on the same side.
+            let onRight = micX > center.x
+            let inner = onRight ? micX + 21 + 10 : micX - 21 - 10
+            let besideRoom = onRight ? size.width - 12 - inner : inner - 12
+            var composeOverHead = false
+            var composeUnderFeet = false
+            if besideRoom >= 240 {
+                composeWidth = min(Self.composeMaxWidth, besideRoom)
+                composeEdge = CGPoint(
+                    x: onRight ? inner + composeWidth / 2 : inner - composeWidth / 2,
+                    y: min(micCenter.y + Self.composeHeight / 2, bottom - 8)
+                )
+                composeGrowsUp = true
+                composeAnchor = onRight ? .leading : .trailing
+            } else {
+                // A narrow window: under her, or over her head when there's
+                // no room below.
+                composeWidth = min(Self.composeMaxWidth, size.width - 24)
+                let x = min(max(center.x, composeWidth / 2 + 12), size.width - composeWidth / 2 - 12)
+                if bottom - underFeet >= Self.composeHeight + 16 {
+                    composeEdge = CGPoint(x: x, y: underFeet + 8)
+                    composeGrowsUp = false
+                    composeAnchor = .top
+                    composeUnderFeet = !isVoice
+                } else {
+                    composeEdge = CGPoint(x: x, y: overHead - 8)
+                    composeGrowsUp = true
+                    composeAnchor = .bottom
+                    composeOverHead = !isVoice
+                }
+            }
+
+            // Over her head, past the compose box if it's there.
+            let top = composeOverHead ? overHead - Self.composeHeight - 16 : overHead
+            let foot = composeUnderFeet ? underFeet + Self.composeHeight + 16 : underFeet
+            let roomAbove = top - (safeTop + 8)
+            let roomBelow = bottom - foot - 8
             bubbleAbove = roomAbove >= 140 || roomAbove >= roomBelow
             bubbleAnchor = CGPoint(
                 x: min(max(center.x, Self.bubbleWidth / 2 + 12), size.width - Self.bubbleWidth / 2 - 12),
-                y: bubbleAbove ? overHead : underFeet
+                y: bubbleAbove ? top : foot
             )
             bubbleRoom = max(bubbleAbove ? roomAbove : roomBelow, 60)
+            problemCenter = CGPoint(x: center.x, y: roomAbove >= 40 ? overHead - 4 : underFeet + 4)
         }
     }
 }
 
 /// Voice or Chat, beside the study pal. Voice: she talks back, the mic is
-/// beside her, and she listens for her name. Chat: she only writes.
+/// beside her, and she listens for her name. Chat: she only writes, and a
+/// compose box sits beside her.
 private struct PalModeSwitch: View {
     @Binding var isVoice: Bool
 
@@ -490,6 +628,52 @@ private struct PalModeSwitch: View {
         .buttonStyle(.plain)
         .accessibilityLabel("\(label) Mode")
         .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+}
+
+/// Voice mode's only sign that something went wrong: a small "!" over her
+/// head. Tap it to read what happened in a popover, with a button to fix
+/// it when there is one.
+private struct PalProblemButton: View {
+    let text: String
+    let actionTitle: String?
+    let action: (() -> Void)?
+    /// The popover closed.
+    let onDismiss: () -> Void
+
+    @State private var isShowing = false
+
+    var body: some View {
+        Button { isShowing = true } label: {
+            Image(systemName: "exclamationmark")
+                .font(.system(size: 16, weight: .heavy))
+                .foregroundStyle(.orange)
+                .frame(width: 36, height: 36)
+                .glassEffect(.regular.interactive(), in: .circle)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Something Went Wrong")
+        .accessibilityValue(text)
+        .popover(isPresented: $isShowing) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text(text)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let actionTitle, let action {
+                    Button(actionTitle) {
+                        isShowing = false
+                        action()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(20)
+            .frame(width: 320, alignment: .leading)
+            .presentationCompactAdaptation(.popover)
+        }
+        .onChange(of: isShowing) { _, showing in
+            if !showing { onDismiss() }
+        }
     }
 }
 

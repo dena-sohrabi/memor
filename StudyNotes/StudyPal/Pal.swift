@@ -6,9 +6,10 @@ import UserNotifications
 /// (`StudyPalSpeaker`), and the state of her chat card.
 ///
 /// - A switch beside her picks Voice or Chat. In Voice mode, talk to her
-///   with voice messages: hold the mic and let go to send, or tap it, talk,
-///   and tap it again; she reads her replies aloud. In Chat mode, she only
-///   writes. Every reply shows in her chat card.
+///   with voice messages: tap her (or the mic) and talk, and it's sent when
+///   you pause, or hold the mic and let go to send; she says her replies
+///   out loud, and no words show on screen. In Chat mode, she only writes:
+///   a compose box sits beside her, and her replies show in her chat card.
 /// - Or say "Hey" and her name, and what you want.
 /// - Circle something on a page and it goes to her right away, or with the
 ///   voice message you're in the middle of.
@@ -33,21 +34,26 @@ final class Pal {
 
     nonisolated static let modeKey = "studyPal.mode"
 
-    /// Voice or Chat, from the switch beside her. Voice: she reads her
-    /// replies aloud, the mic is beside her, and she listens for "Hey" and
-    /// her name. Chat: she only writes, for when you can't talk out loud;
-    /// tapping her opens her card ready to type.
+    /// Voice or Chat, from the switch beside her. Voice: she says her
+    /// replies out loud, the mic is beside her, she listens for "Hey" and
+    /// her name, and nothing shows as text (her card stays closed). Chat:
+    /// she only writes, for when you can't talk out loud; a compose box
+    /// sits beside her, and tapping her puts the cursor in it.
     var isVoiceMode = (UserDefaults.standard.string(forKey: Pal.modeKey) ?? "voice") != "chat" {
         didSet {
             UserDefaults.standard.set(isVoiceMode ? "voice" : "chat", forKey: Self.modeKey)
-            if !isVoiceMode {
+            if isVoiceMode {
+                // The talk carries on; it just isn't shown.
+                isPaletteOpen = false
+            } else {
                 hush()
                 wake.stopNow()
             }
         }
     }
 
-    /// Asks her card to put the cursor in its text field (Chat mode).
+    /// Asks the compose box beside her to put the cursor in its field
+    /// (Chat mode).
     private(set) var typingRequests = 0
 
     /// Opens windows for her (set by the window she's in).
@@ -91,6 +97,21 @@ final class Pal {
         listener.onHeard = { [weak self] text in
             self?.send(text, spoken: true)
         }
+        // What you're studying goes along when you talk, so its words are
+        // heard right.
+        let context: () -> SpeechContext = {
+            let pages = PalWorkspace.shared.visiblePages
+            let text = pages.map { $0.palVocabularyText() }.joined(separator: "\n")
+            var seen = Set<String>()
+            let titles = pages.map(\.palItemTitle).filter { seen.insert($0).inserted }
+            let name = StudyPalCharacter.name
+            return SpeechContext(
+                keywords: SpeechVocabulary.hints(from: text, name: name),
+                prompt: SpeechVocabulary.prompt(name: name, studying: titles)
+            )
+        }
+        listener.context = context
+        wake.context = context
         wake.onWake = { [weak self] in
             self?.hush()
         }
@@ -173,16 +194,15 @@ final class Pal {
         speaker.stop()
     }
 
-    /// Opens her card with the cursor in its text field.
+    /// Puts the cursor in the compose box beside her (Chat mode).
     func startTyping() {
-        isPaletteOpen = true
         typingRequests += 1
     }
 
     // MARK: Voice messages
 
-    /// You pressed the mic. `holding`: let go to send; otherwise a second
-    /// tap sends.
+    /// You pressed the mic, or tapped her in Voice mode. `holding`: let go
+    /// to send; otherwise it's sent when you pause, or when you tap again.
     func startRecording(holding: Bool) {
         hush()
         // The microphone is yours now, not her name-listening.
@@ -191,8 +211,8 @@ final class Pal {
         listener.start(holding: holding)
     }
 
-    /// The press turned out to be a tap: she listens until you tap again,
-    /// or gives up after a while if you say nothing.
+    /// The press turned out to be a tap: she listens until you pause or
+    /// tap again, or gives up after a while if you say nothing.
     func recordingBecameTap() {
         listener.becameTap()
     }
@@ -224,13 +244,16 @@ final class Pal {
     }
 
     /// You drew a loop: it goes to her right away, unless you're in the
-    /// middle of a voice message or she's busy; then it waits in her card.
+    /// middle of a voice message (then it goes with it). In Chat mode her
+    /// card opens, and if she's busy it waits there; in Voice mode it
+    /// takes over from what she was doing, and she answers out loud.
     func circled(_ circle: PalCircle) {
         circlingPage = nil
         isCircling = false
-        isPaletteOpen = true
         attachedCircle = circle
-        guard !listener.isListening, !brain.isWorking, hasKey else { return }
+        if !isVoiceMode { isPaletteOpen = true }
+        guard !listener.isListening, hasKey else { return }
+        guard isVoiceMode || !brain.isWorking else { return }
         send("", spoken: false)
     }
 
@@ -240,7 +263,9 @@ final class Pal {
 
     // MARK: Her card
 
+    /// Opens her chat card. Only in Chat mode: Voice mode shows no words.
     func openPalette() {
+        guard !isVoiceMode else { return }
         isPaletteOpen = true
     }
 

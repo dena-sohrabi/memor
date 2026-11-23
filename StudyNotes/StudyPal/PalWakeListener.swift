@@ -42,8 +42,20 @@ final class PalWakeListener {
     @ObservationIgnored var onCommand: ((String) -> Void)?
     /// Whether she should be listening for her name right now.
     @ObservationIgnored var shouldListen: () -> Bool = { false }
+    /// The words on your open pages and what you're studying.
+    @ObservationIgnored var context: () -> SpeechContext = { SpeechContext() }
+
+    /// What you said after her name is being turned into text.
+    private(set) var isTranscribing = false
 
     @ObservationIgnored private var capture: SpeechCapture?
+    /// From the moment she hears her name, what you say streams to OpenAI.
+    @ObservationIgnored private var transcriber: PalTranscriber?
+    @ObservationIgnored private var speech = SpeechContext()
+    /// The last couple of seconds of sound while she waits for her name,
+    /// so the start of what you say isn't lost while her name is spotted.
+    @ObservationIgnored private var recent: [Data] = []
+    @ObservationIgnored private var recentBytes = 0
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var endTask: Task<Void, Never>?
     @ObservationIgnored private var restartTask: Task<Void, Never>?
@@ -60,6 +72,8 @@ final class PalWakeListener {
     /// A recognition session is renewed this often while she waits, so it
     /// never grows long.
     private static let renewEvery: Duration = .seconds(50)
+    /// How much sound from before her name was spotted goes along.
+    private static let recentLimit = PalTranscriber.bytesPerSecond * 5 / 2
     private static let greetings: Set<String> = ["hey", "hi", "hello", "okay", "ok", "hay", "yo"]
 
     /// Starts watching whether she should listen, and listens when she should.
@@ -108,7 +122,9 @@ final class PalWakeListener {
         nameWords = Self.words(StudyPalCharacter.name ?? "study pal")
         command = ""
         state = .waiting
-        let hints = StudyPalCharacter.name.map { ["Hey \($0)", $0] } ?? ["Hey study pal"]
+        let wakeHints = StudyPalCharacter.name.map { ["Hey \($0)", $0] } ?? ["Hey study pal"]
+        speech = context()
+        let hints = wakeHints + speech.keywords.filter { !wakeHints.contains($0) }.prefix(SpeechVocabulary.limit - wakeHints.count)
         Task {
             if let problem = await SpeechCapture.prepare() {
                 guard self.generation == generation else { return }
@@ -118,9 +134,11 @@ final class PalWakeListener {
             }
             guard self.generation == generation, state == .waiting else { return }
             let capture = SpeechCapture()
-            let (events, sink) = AsyncStream.makeStream(of: SpeechEvent.self, bufferingPolicy: .bufferingNewest(64))
+            // Room for several seconds of sound, so none is dropped if the
+            // app is busy for a moment.
+            let (events, sink) = AsyncStream.makeStream(of: SpeechEvent.self, bufferingPolicy: .bufferingNewest(1_024))
             do {
-                try capture.start(events: sink, hints: hints, quietly: true)
+                try capture.start(events: sink, hints: hints, quietly: true, recognizes: true)
             } catch {
                 capture.stop(releasingAudio: false)
                 state = .off
@@ -134,6 +152,7 @@ final class PalWakeListener {
                 switch event {
                 case .text(let text, _): heard(text, generation: generation)
                 case .level: break
+                case .audio(let data): hear(data)
                 case .failed:
                     // Recognition gave up (it does after long quiet): start afresh.
                     if state == .capturing, !command.isEmpty {
@@ -153,8 +172,37 @@ final class PalWakeListener {
         restartTask?.cancel()
         capture?.stop(releasingAudio: false)
         capture = nil
+        transcriber?.cancel()
+        transcriber = nil
+        recent = []
+        recentBytes = 0
         command = ""
         state = .off
+    }
+
+    /// Sound: while she waits for her name, only the last bit is kept; once
+    /// she's heard it, it streams to OpenAI.
+    private func hear(_ data: Data) {
+        if let transcriber {
+            transcriber.append(data)
+            return
+        }
+        recent.append(data)
+        recentBytes += data.count
+        while recentBytes > Self.recentLimit, !recent.isEmpty {
+            recentBytes -= recent.removeFirst().count
+        }
+    }
+
+    /// She heard her name: what you say from here (and the moment before,
+    /// her name included) goes to OpenAI to be turned into text. Without an
+    /// OpenAI key, the iPad's own words are used.
+    private func startTranscribing() {
+        guard transcriber == nil, let transcriber = try? PalTranscriber(context: speech) else { return }
+        self.transcriber = transcriber
+        for chunk in recent { transcriber.append(chunk) }
+        recent = []
+        recentBytes = 0
     }
 
     /// A fresh recognition session, so it doesn't grow long.
@@ -183,6 +231,7 @@ final class PalWakeListener {
         if state == .waiting {
             state = .capturing
             restartTask?.cancel()
+            startTranscribing()
             onWake?()
             command = said
             waitForPause(said.isEmpty ? Self.firstPause : Self.pause, generation: generation)
@@ -201,14 +250,44 @@ final class PalWakeListener {
         }
     }
 
-    /// You paused: what you said goes to her, and she listens for her name
-    /// again after she's answered.
+    /// You paused: what you said goes to her, as OpenAI heard it, and she
+    /// listens for her name again after she's answered.
     private func finish(generation: Int) {
         guard self.generation == generation, state == .capturing else { return }
-        let text = command
+        let onDevice = command
+        let name = nameWords
+        let transcriber = self.transcriber
+        self.transcriber = nil
         end()
         restAfter = .now.addingTimeInterval(1)
-        if !text.isEmpty { onCommand?(text) }
+        guard let transcriber else {
+            if !onDevice.isEmpty { onCommand?(onDevice) }
+            return
+        }
+        isTranscribing = true
+        Task {
+            let result = await transcriber.finish()
+            isTranscribing = false
+            var text = onDevice
+            if case .success(let heard) = result, !heard.isEmpty {
+                // It heard "Hey <name>" too (and maybe a bit before it).
+                if let said = Self.command(in: heard, name: name) {
+                    if !said.isEmpty { text = said }
+                } else {
+                    text = heard
+                }
+            }
+            if !text.isEmpty { onCommand?(text) }
+        }
+    }
+
+    /// What was said after the last "Hey <name>" in `text`, or nil if her
+    /// name isn't in it.
+    private static func command(in text: String, name: [String]) -> String? {
+        let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let start = wakeEnd(in: tokens, name: name) else { return nil }
+        return tokens[start...].joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet.whitespaces.union(.punctuationCharacters))
     }
 
     // MARK: Hearing her name

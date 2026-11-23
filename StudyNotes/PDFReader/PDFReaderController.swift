@@ -681,6 +681,21 @@ extension PDFReaderController: PalPage {
         return PalSnapshot(image: picture?.image, area: CGRect(origin: .zero, size: size), imageSize: picture?.size ?? .zero, text: text, selection: selection)
     }
 
+    /// The title, the page in view and the two on each side of it, and the
+    /// typed notes on the page in view.
+    func palVocabularyText() -> String {
+        let index = pageIndex(nil)
+        let last = document.pageCount - 1
+        var parts = [item.title]
+        if last >= 0 {
+            for page in max(index - 2, 0)...min(index + 2, last) {
+                if let text = document.page(at: page)?.string { parts.append(String(text.prefix(12_000))) }
+            }
+        }
+        parts.append(palNotes(pageIndex: index))
+        return parts.joined(separator: "\n")
+    }
+
     func palLook(at area: CGRect?, pageIndex index: Int?, labelHandwriting: Bool) -> (image: Data, area: CGRect)? {
         let index = pageIndex(index)
         let full = CGRect(origin: .zero, size: pageSize(index))

@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// The study pal's chat card: your talk with her, what you circled, a few
-/// things to ask, and a field to type in, with the mic and the circle tool
-/// beside it. It grows with the talk, up to `maxHeight`. Drag it by its top.
+/// The study pal's chat card (Chat mode only): your talk with her, what you
+/// circled, a few things to ask, and a field to type in, with the mic and
+/// the circle tool beside it. It grows with the talk, up to `maxHeight`.
+/// Drag it by its top.
 struct PalPalette: View {
     let maxHeight: CGFloat
     /// The card is being dragged this far.
@@ -37,9 +38,12 @@ struct PalPalette: View {
             // Typing takes over from talking.
             if typing, pal.listener.isListening { pal.cancelRecording() }
         }
-        // Chat mode: tapping her puts the cursor here.
-        .onChange(of: pal.typingRequests) { isTyping = true }
-        .onAppear { if !pal.isVoiceMode { isTyping = true } }
+        .task {
+            // Opens ready for the next message. Focus set the moment it
+            // appears, mid-transition, is often dropped.
+            try? await Task.sleep(for: .milliseconds(150))
+            if !pal.listener.isListening { isTyping = true }
+        }
     }
 
     // MARK: Header
@@ -99,8 +103,8 @@ struct PalPalette: View {
                 VStack(alignment: .leading, spacing: 14) {
                     if brain.messages.isEmpty {
                         Text(pal.hasKey
-                             ? "Hold the mic and talk to me, or type. Circle anything on your page to show me."
-                             : "I need an OpenAI key to think and talk. Add one in Settings.")
+                             ? "Write to me, or tap the mic and talk. Circle anything on your page to show me."
+                             : "I need an API key to think. Add one in Settings.")
                             .foregroundStyle(.secondary)
                         if !pal.hasKey {
                             Button("Open Settings", action: onNeedsKey)
@@ -355,8 +359,11 @@ private struct PalMessageView: View {
     }
 }
 
-/// The voice-message button. Hold it while you talk and let go to send
-/// (slide away first to cancel), or tap it, talk, and tap it again.
+/// The voice-message button. Tap it and talk: it's sent when you pause,
+/// or when you tap it again. Or hold it while you talk and let go to send
+/// (slide away first to cancel). Beside her, a small ✕ over it drops a
+/// tapped-on message instead. No words: what's happening shows in the
+/// button itself.
 struct PalMicButton: View {
     enum Style {
         /// In her card, beside the text field.
@@ -367,10 +374,11 @@ struct PalMicButton: View {
 
     let style: Style
 
+    /// When the finger went down on it.
     @State private var pressedAt: Date?
-    /// A quick tap started it: the next tap sends.
-    @State private var isTapMode = false
-    @State private var isSecondTap = false
+    /// She was already listening when this press began, so letting go
+    /// sends what you said.
+    @State private var sendsOnRelease = false
     @State private var willCancel = false
 
     private var listener: StudyPalListener { Pal.shared.listener }
@@ -381,6 +389,7 @@ struct PalMicButton: View {
     var body: some View {
         let listening = listener.isListening
         let level = CGFloat(listener.level)
+        let isHolding = pressedAt != nil && !sendsOnRelease
         Image(systemName: willCancel ? "xmark" : (listening ? "waveform" : "mic.fill"))
             .font(.system(size: style == .floating ? 22 : 20, weight: .semibold))
             .symbolEffect(.variableColor.iterative, isActive: listening && !willCancel)
@@ -396,19 +405,6 @@ struct PalMicButton: View {
             }
             .glassEffect(style == .floating ? .regular.interactive() : .identity, in: .circle)
             .contentShape(.circle)
-            .overlay(alignment: style == .floating ? .top : .topTrailing) {
-                if listening, let hint {
-                    Text(hint)
-                        .font(.caption.weight(.medium))
-                        .fixedSize()
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .glassEffect(.regular, in: .capsule)
-                        .offset(y: -44)
-                        .allowsHitTesting(false)
-                        .transition(.opacity)
-                }
-            }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { pressing($0) }
@@ -416,7 +412,7 @@ struct PalMicButton: View {
             )
             .onChange(of: listening) { _, listening in
                 // She stopped on her own (or was cancelled).
-                if !listening { reset() }
+                if !listening, pressedAt == nil { willCancel = false }
             }
             .accessibilityElement()
             .accessibilityLabel(listening ? "Send Voice Message" : "Talk")
@@ -424,54 +420,136 @@ struct PalMicButton: View {
             .accessibilityAction {
                 if listener.isListening { Pal.shared.finishRecording() } else { Pal.shared.startRecording(holding: false) }
             }
+            .overlay(alignment: .top) {
+                // Tapped on (not held): a way to drop it instead of sending.
+                if style == .floating, listening, !isHolding {
+                    Button { Pal.shared.cancelRecording() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 32, height: 32)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            .contentShape(.circle)
+                    }
+                    .buttonStyle(.plain)
+                    .offset(y: -44)
+                    .accessibilityLabel("Cancel Voice Message")
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
+            }
             .animation(.snappy, value: listening)
-    }
-
-    private var hint: String? {
-        if willCancel { return "Let go to cancel" }
-        if isTapMode { return "Tap to send" }
-        return pressedAt != nil ? "Let go to send" : nil
+            .animation(.snappy, value: isHolding)
     }
 
     private func pressing(_ value: DragGesture.Value) {
-        if pressedAt == nil, !isSecondTap {
-            if isTapMode, listener.isListening {
-                // The tap that sends.
-                isSecondTap = true
-                return
-            }
+        if pressedAt == nil {
             pressedAt = .now
-            Pal.shared.startRecording(holding: true)
+            willCancel = false
+            // Already listening (tapped on, here or on her): this press sends.
+            sendsOnRelease = listener.isListening
+            if !sendsOnRelease { Pal.shared.startRecording(holding: true) }
         }
-        if pressedAt != nil, !isTapMode {
+        if !sendsOnRelease {
             willCancel = hypot(value.translation.width, value.translation.height) > 90
         }
     }
 
     private func released(_ value: DragGesture.Value) {
-        if isSecondTap {
-            reset()
-            Pal.shared.finishRecording()
-            return
-        }
         guard let pressedAt else { return }
+        let sends = sendsOnRelease
+        let cancels = willCancel
         self.pressedAt = nil
-        if willCancel {
-            reset()
+        sendsOnRelease = false
+        willCancel = false
+        if sends {
+            Pal.shared.finishRecording()
+        } else if cancels {
             Pal.shared.cancelRecording()
         } else if Date.now.timeIntervalSince(pressedAt) < Self.tapLength {
-            isTapMode = true
+            // A tap: she keeps listening, and sends when you pause.
             Pal.shared.recordingBecameTap()
         } else {
-            reset()
             Pal.shared.finishRecording()
         }
     }
+}
 
-    private func reset() {
-        pressedAt = nil
-        isTapMode = false
-        isSecondTap = false
-        willCancel = false
+/// Chat mode: the box beside her for writing to her, while her card is
+/// closed. Tapping her puts the cursor here. Send, and her card opens with
+/// your talk (its own field takes the next message); close the card and
+/// this box is back. With a talk going, the bubbles button opens the card
+/// without sending anything.
+struct PalComposeBar: View {
+    let width: CGFloat
+    /// There's no key for her mind yet: Settings should open.
+    let onNeedsKey: () -> Void
+
+    @State private var draft = ""
+    @FocusState private var isFocused: Bool
+    @AppStorage(StudyPalCharacter.nameKey) private var palName = ""
+
+    private var pal: Pal { .shared }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 4) {
+            TextField(prompt, text: $draft, axis: .vertical)
+                .lineLimit(1...4)
+                .focused($isFocused)
+                .onSubmit(send)
+                .disabled(!pal.hasKey)
+                .padding(.vertical, 10)
+                .padding(.leading, 16)
+            if !pal.brain.messages.isEmpty {
+                Button { pal.openPalette() } label: {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 36, height: 40)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Show Chat")
+            }
+            Button(action: send) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 30))
+                    .frame(height: 40)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(canSend ? Color.accentColor : Color.secondary)
+            .disabled(!canSend)
+            .accessibilityLabel("Send")
+        }
+        .padding(.trailing, 6)
+        .padding(.vertical, 3)
+        .frame(width: width)
+        .glassEffect(.regular, in: .rect(cornerRadius: 23))
+        .shadow(color: .black.opacity(0.1), radius: 12, y: 3)
+        .overlay {
+            // Without a key the field can't be used; tapping it says where to add one.
+            if !pal.hasKey {
+                Color.clear
+                    .contentShape(.rect(cornerRadius: 23))
+                    .onTapGesture(perform: onNeedsKey)
+            }
+        }
+        .onChange(of: pal.typingRequests) { isFocused = true }
+    }
+
+    private var prompt: String {
+        guard pal.hasKey else { return "Add a key in Settings to chat" }
+        let name = palName.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Write to your study pal…" : "Write to \(name)…"
+    }
+
+    private var canSend: Bool {
+        pal.hasKey && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func send() {
+        guard canSend else { return }
+        pal.send(draft)
+        draft = ""
+        pal.openPalette()
     }
 }

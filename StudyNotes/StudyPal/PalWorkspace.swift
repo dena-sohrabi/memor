@@ -67,6 +67,9 @@ protocol PalPage: AnyObject {
 
     /// What's on screen, and the page's text.
     func palSnapshot() -> PalSnapshot
+    /// The text around where the student is (no pictures, so it's quick),
+    /// so speech-to-text knows the words of their subject.
+    func palVocabularyText() -> String
     /// A sharp picture of one area (page points; nil for everything on the
     /// page), and the area it shows. On a PDF, of `pageIndex` (or the page
     /// in view). `labelHandwriting`: each handwritten word gets a numbered
@@ -112,6 +115,14 @@ protocol PalPage: AnyObject {
     /// Turns on circling: the next loop the student draws goes to her.
     func palStartCircling()
     func palStopCircling()
+}
+
+extension PalPage {
+    /// The title and the typed notes. (Handwriting isn't text, so it can't
+    /// help.) PDFs add the text of the pages around the one in view.
+    func palVocabularyText() -> String {
+        [palItemTitle, palNotes(pageIndex: nil)].joined(separator: "\n")
+    }
 }
 
 /// Page descriptions for the study pal, as JSON.

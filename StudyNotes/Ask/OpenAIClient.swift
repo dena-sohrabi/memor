@@ -5,6 +5,7 @@ import Foundation
 /// - her mind: GPT-6.2 Sol, through the Responses API (`streamResponse`);
 /// - small chores, like writing down what she remembers: GPT-6 Luna;
 /// - her speaking voice: the realtime model, reading out what she wrote;
+/// - her ears: live transcription of what you say to her;
 /// - the pictures she draws.
 ///
 /// Raw HTTP, locked down so the key can't end up anywhere but
@@ -23,6 +24,9 @@ enum OpenAIClient {
     static let voiceModel = "gpt-realtime-2.1-mini"
     /// Fast, everyday image generation.
     static let imageModel = "gpt-image-2.6-flare"
+    /// Turns speech into text as it's spoken: OpenAI's recommended model
+    /// for realtime transcription.
+    static let transcriptionModel = "gpt-live-transcribe"
 
     private static let modelsURL = URL(string: "https://api.openai.com/v1/models")!
     private static let imagesURL = URL(string: "https://api.openai.com/v1/images/generations")!
@@ -85,6 +89,14 @@ enum OpenAIClient {
         var components = URLComponents(string: "wss://api.openai.com/v1/realtime")!
         components.queryItems = [URLQueryItem(name: "model", value: voiceModel)]
         var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        return session.webSocketTask(with: request)
+    }
+
+    /// A connection for transcription only (no replies), not yet started.
+    static func transcriptionSocket() throws -> URLSessionWebSocketTask {
+        guard let key = OpenAIKeyStore.read() else { throw OpenAIError.noKey }
+        var request = URLRequest(url: URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!)
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         return session.webSocketTask(with: request)
     }

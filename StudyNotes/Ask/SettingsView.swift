@@ -238,9 +238,9 @@ enum APIKeyKind {
     var usage: String {
         switch self {
         case .claude:
-            "When Claude is her mind, your messages go to Anthropic: as text (your voice is turned into text on your iPad and never leaves it), with pictures of the pages on your screen, their text, what you circled or selected, and what she remembers about you and those notes. Claude's small model writes down what she should remember."
+            "When Claude is her mind, your messages go to Anthropic: as text (what you say out loud is turned into text by OpenAI first), with pictures of the pages on your screen, their text, what you circled or selected, and what she remembers about you and those notes. Claude's small model writes down what she should remember."
         case .openAI:
-            "Her voice and the pictures she draws come from OpenAI: what she says goes to OpenAI to be spoken, and what she wants drawn to be drawn. When GPT is her mind, your messages go to OpenAI the same way they'd go to Anthropic for Claude. Nothing is stored on OpenAI's side for the conversation."
+            "Her ears, her voice and the pictures she draws come from OpenAI: what you say to her goes to OpenAI to be turned into text, with the words on your open pages so it's heard right; what she says goes to OpenAI to be spoken; and what she wants drawn, to be drawn. Listening for “Hey” and her name stays on your iPad. When GPT is her mind, your messages go to OpenAI the same way they'd go to Anthropic for Claude. Nothing is stored on OpenAI's side for the conversation."
         }
     }
 
