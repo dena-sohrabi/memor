@@ -120,6 +120,14 @@ final class NotebookCanvasController: UIViewController {
     private let viewportDebouncer = Debouncer()
     private var didRestoreViewport = false
     private var lastLayoutSize: CGSize = .zero
+    /// Where the page's top-left corner was in the window at the last
+    /// layout, so the page can stay put when the toolbars or the keyboard
+    /// come and go.
+    private var lastLayoutOrigin: CGPoint?
+    /// When the Pencil last touched the page (or is touching it now:
+    /// `.infinity`), so a hand resting on the screen while writing doesn't
+    /// count as a tap.
+    private var lastPencilUse: CFTimeInterval = 0
     private var isTextMode: Bool
     /// Set once another page is replacing this one.
     private var isLeaving = false
@@ -271,15 +279,30 @@ final class NotebookCanvasController: UIViewController {
         // puts the saved spot half a screen off.
         let size = canvasView.bounds.size
         guard size.width > 0, size.height > 0 else { return }
+        let origin = view.window.map { view.convert(CGPoint.zero, to: $0) }
         if !didRestoreViewport {
             didRestoreViewport = true
             restoreViewport()
         } else if lastLayoutSize != .zero, size != lastLayoutSize {
-            // Rotation, split view or the toolbar hiding: keep the same spot centered.
-            canvasView.contentOffset.x += (lastLayoutSize.width - size.width) / 2
-            canvasView.contentOffset.y += (lastLayoutSize.height - size.height) / 2
+            if size.width != lastLayoutSize.width {
+                // The window changed shape (rotation, split view, Stage
+                // Manager): keep the same spot centered.
+                canvasView.contentOffset.x += (lastLayoutSize.width - size.width) / 2
+                canvasView.contentOffset.y += (lastLayoutSize.height - size.height) / 2
+            } else {
+                // Only the height changed: the toolbars hid or showed (a tap
+                // on empty paper), or the keyboard came or went. The page
+                // stays where it is on screen and just shows more or less
+                // of itself. When the top edge moved, the page moves the
+                // other way so nothing on it jumps.
+                if let origin, let lastLayoutOrigin {
+                    canvasView.contentOffset.y += origin.y - lastLayoutOrigin.y
+                }
+                if size.height < lastLayoutSize.height { keepEditingBoxInView() }
+            }
         }
         lastLayoutSize = size
+        lastLayoutOrigin = origin
         updateDots()
         images.updateOverlay()
     }
@@ -632,6 +655,15 @@ final class NotebookCanvasController: UIViewController {
         return true
     }
 
+    /// The page got shorter (the keyboard came up): if the text box being
+    /// typed in is now under the keyboard, scroll just enough to show it.
+    private func keepEditingBoxInView() {
+        guard let box = textBoxes.editingBox, box.window != nil else { return }
+        let frame = box.convert(box.bounds, to: canvasView).insetBy(dx: 0, dy: -16)
+        guard !canvasView.bounds.contains(frame) else { return }
+        canvasView.scrollRectToVisible(frame, animated: true)
+    }
+
     private func restoreCanvasFocusSoon() {
         // Wait a turn: if another box is taking focus, leave it alone.
         Task { [weak self] in
@@ -652,9 +684,12 @@ extension NotebookCanvasController: PKCanvasViewDelegate {
         images.deselect()
         // A hand resting on the screen while writing mustn't scroll the page.
         canvasView.isScrollEnabled = false
+        // Nor hide the toolbars (see `isPalmOrWritingHand`).
+        lastPencilUse = .infinity
     }
 
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
+        lastPencilUse = CACurrentMediaTime()
         canvasView.isScrollEnabled = true
         eraserReturn?.canvasDidEndUsingTool()
     }
@@ -725,8 +760,18 @@ extension NotebookCanvasController: UIGestureRecognizerDelegate {
         if gestureRecognizer === chromeTap {
             // Noted before any other tap deselects things.
             hadSelectionAtTap = images.selectedID != nil || textBoxes.hasSelection
+            // Only a real finger tap shows or hides the toolbars.
+            if isPalmOrWritingHand(touch) { return false }
         }
         return true
+    }
+
+    /// A palm, or a hand touching the page while the Pencil writes or
+    /// just after, isn't a tap on empty paper, even when it lifts like one.
+    private func isPalmOrWritingHand(_ touch: UITouch) -> Bool {
+        // A fingertip is about 10 to 20 points across; a palm far more.
+        if touch.majorRadius > 30 { return true }
+        return CACurrentMediaTime() - lastPencilUse < 0.8
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {

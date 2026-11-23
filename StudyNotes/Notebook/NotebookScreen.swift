@@ -10,6 +10,8 @@ struct NotebookScreen: View {
     @State private var renamingPage: NotebookPage?
     @State private var pageTitle = ""
     @State private var pageToDelete: NotebookPage?
+    /// The page that was open has been put back (once per screen).
+    @State private var didReopenPage = false
 
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 20, alignment: .top)]
 
@@ -58,6 +60,12 @@ struct NotebookScreen: View {
                 try? modelContext.save()
             }
             showRequestedPage()
+            reopenPageIfOneWasOpen()
+        }
+        // Remembers whether a page or the grid is showing, so the window
+        // comes back the same way.
+        .onChange(of: openedPage) { _, page in
+            showsPage = page != nil
         }
         // The study pal went to a page of this notebook.
         .onChange(of: PalNavigator.shared.request) { showRequestedPage() }
@@ -117,6 +125,39 @@ struct NotebookScreen: View {
               let page = notebook.sortedPages.first(where: { $0.id == request.pageID }) else { return }
         PalNavigator.shared.done(request)
         open(page)
+    }
+
+    /// Whether a page of this notebook is open, rather than the grid. Kept
+    /// on this iPad (not in the library, so iCloud isn't involved) and
+    /// written right away, so it survives Memor being closed, even by a
+    /// crash or by iPadOS when memory runs low.
+    private var showsPage: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.showsPageKey(notebook.id)) }
+        nonmutating set {
+            let key = Self.showsPageKey(notebook.id)
+            if newValue { UserDefaults.standard.set(true, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+    }
+
+    private static func showsPageKey(_ id: UUID) -> String {
+        "notebook.showsPage.\(id.uuidString)"
+    }
+
+    /// Whenever this window is built again (iPadOS let it go in the
+    /// background, Memor was closed and reopened, or iCloud sync redrew
+    /// it), it opens the page that was open, instead of the grid. The page
+    /// itself is `currentPageID`, which every way of changing pages keeps
+    /// up to date. Going back to the grid first means it opens on the grid.
+    private func reopenPageIfOneWasOpen() {
+        guard !didReopenPage else { return }
+        didReopenPage = true
+        guard openedPage == nil, showsPage,
+              let id = notebook.currentPageID,
+              let page = notebook.sortedPages.first(where: { $0.id == id }) else { return }
+        // Straight onto the page, with no slide in.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { openedPage = page }
     }
 
     /// Adds a page at the end and opens it.
