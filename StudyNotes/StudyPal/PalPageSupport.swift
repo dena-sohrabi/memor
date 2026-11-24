@@ -148,6 +148,32 @@ final class PalHandwriting {
         return (result, false)
     }
 
+    /// Colors words by id, or the writing lying mostly inside `region`
+    /// (not highlighter), whoever wrote it.
+    func recolor(ids: [String], region: CGRect?, to color: UIColor, on canvas: PKCanvasView) -> (result: String, isError: Bool) {
+        let (keys, unknown) = keys(for: ids)
+        var drawing = canvas.drawing
+        var changed = 0
+        for index in drawing.strokes.indices {
+            let stroke = drawing.strokes[index]
+            let named = keys.contains(PalStrokeKey(stroke))
+            let inRegion = region.map { stroke.ink.inkType != .marker && Self.isMostlyInside(stroke.renderBounds, $0) } ?? false
+            guard named || inRegion else { continue }
+            drawing.strokes[index].ink = PKInk(stroke.ink.inkType, color: color)
+            changed += 1
+        }
+        guard changed > 0 else {
+            if !unknown.isEmpty {
+                return ("Unknown ids \(unknown.joined(separator: ", ")): look again with look_at (label_handwriting true) for the current ids.", true)
+            }
+            return ("No writing there to color. Check where it is with get_page_items or look_at.", true)
+        }
+        PalInkEditing.replace(canvas, with: drawing, actionName: "Color")
+        var result = "Colored \(changed) stroke\(changed == 1 ? "" : "s"). They can undo this."
+        if !unknown.isEmpty { result += " Unknown ids, not colored: \(unknown.joined(separator: ", "))." }
+        return (result, false)
+    }
+
     private static func isMostlyInside(_ bounds: CGRect, _ region: CGRect) -> Bool {
         let inside = bounds.intersection(region)
         guard !inside.isNull, bounds.width * bounds.height > 0 else { return region.contains(bounds) }

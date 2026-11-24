@@ -57,9 +57,6 @@ final class Pal {
     /// (Chat mode).
     private(set) var typingRequests = 0
 
-    /// Opens windows for her (set by the window she's in).
-    @ObservationIgnored var openWindow: OpenWindowAction?
-
     /// She can think: there's a key for her mind (Claude or GPT).
     private(set) var hasKey = PalMind.current != nil
 

@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// The study pal on top of a window: the library, a notebook or a PDF.
-/// Every window has one of these, but she only shows in the window you
-/// used last, so there's always exactly one of her. Use another window and
-/// she's there instead.
+/// The study pal on top of Memor's window, over the library and whatever
+/// notebook or PDF is open on top of it. She stays put as you go between
+/// them.
 ///
 /// - The switch beside her picks Voice or Chat.
 /// - Voice: no words on screen, except what she's doing while she uses a
@@ -20,7 +19,6 @@ import SwiftUI
 /// - Rub her to scratch her, and carry her anywhere; she keeps her spot.
 struct PalOverlay: View {
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.openWindow) private var openWindow
     @State private var window: ObjectIdentifier?
     @State private var cue = StudyPalCue()
     @State private var showsSettings = false
@@ -59,8 +57,6 @@ struct PalOverlay: View {
                 WindowReader { found in
                     window = ObjectIdentifier(found)
                     PalWorkspace.shared.windowAppeared(found)
-                    // So she can open notebooks and PDFs in their windows.
-                    pal.openWindow = openWindow
                 }
                 .frame(width: 0, height: 0)
             }
@@ -133,8 +129,9 @@ struct PalOverlay: View {
             // She heard her name.
             if isHere, state == .capturing { play(.listen) }
         }
+        // A quiet wave when she's back on screen: no sound.
         .onChange(of: isOut) { _, out in
-            if out { play(.wave) }
+            if out { play(.wave, silent: true) }
         }
     }
 
@@ -272,18 +269,17 @@ struct PalOverlay: View {
 
     /// What she's doing with a tool, over her head, in both modes (her card
     /// shows its own): one line with no background, like the step updates
-    /// in AI chat apps. Each step fades into the next.
+    /// in AI chat apps. Each step fades into the next. It sits clear of the
+    /// mic and the Voice/Chat switch beside her, and of the "!".
     @ViewBuilder
     private func statusLine(_ layout: Layout, size: CGSize) -> some View {
         if layout.palFits, brain.isWorking, let activity = brain.status, !showsCard, !isNaming {
             let width = min(Layout.statusWidth, size.width - 24)
-            // Over the "!" when that's showing too.
-            let lift: CGFloat = voiceProblem != nil ? 44 : 0
             PalStatusLine(activity: activity)
                 .frame(width: width)
                 .position(
                     x: min(max(layout.palCenter.x, width / 2 + 12), size.width - width / 2 - 12),
-                    y: layout.bubbleAbove ? layout.bubbleAnchor.y - 14 - lift : layout.bubbleAnchor.y + 14 + lift
+                    y: layout.statusY(clearingProblem: voiceProblem != nil)
                 )
                 .allowsHitTesting(false)
                 .id(activity)
@@ -420,8 +416,8 @@ struct PalOverlay: View {
         }
     }
 
-    private func play(_ reaction: StudyPalReaction) {
-        cue = cue.next(reaction)
+    private func play(_ reaction: StudyPalReaction, silent: Bool = false) {
+        cue = cue.next(reaction, silent: silent)
     }
 
     private func linger() {
@@ -491,10 +487,16 @@ struct PalOverlay: View {
         var bubbleAbove: Bool
         /// How tall the bubble can grow there.
         var bubbleRoom: CGFloat
+        /// The top and bottom of the mic and the Voice/Chat switch beside her.
+        var buttonsTop: CGFloat
+        var buttonsBottom: CGFloat
         /// How far the card is from the top-right corner, kept on screen.
         var panelOffset: CGSize
         /// Where the card's top is when it hasn't been moved: below the toolbar.
         var panelTop: CGFloat
+
+        /// Half the height of the Voice/Chat switch (two 34-point buttons).
+        static let switchHalfHeight: CGFloat = 41
 
         static let bubbleWidth: CGFloat = 360
         /// Room for the longest status line.
@@ -626,6 +628,33 @@ struct PalOverlay: View {
             )
             bubbleRoom = max(bubbleAbove ? roomAbove : roomBelow, 60)
             problemCenter = CGPoint(x: center.x, y: roomAbove >= 40 ? overHead - 4 : underFeet + 4)
+
+            let micRadius = hasMic ? PalMicButton.floatingSize / 2 : 0
+            buttonsTop = min(micCenter.y - micRadius, switchCenter.y - Self.switchHalfHeight)
+            buttonsBottom = max(micCenter.y + micRadius, switchCenter.y + Self.switchHalfHeight)
+        }
+
+        /// The middle of the status line: over her head and over the mic
+        /// and switch beside her (or under her feet and under them), so it
+        /// never runs into them, wherever she sits. `clearingProblem`: the
+        /// "!" is showing, and the line goes past it too.
+        func statusY(clearingProblem: Bool) -> CGFloat {
+            // Half the line's height, and a little room.
+            let half: CGFloat = 12
+            let gap: CGFloat = 6
+            if bubbleAbove {
+                var y = min(bubbleAnchor.y - 14, buttonsTop - gap - half)
+                if clearingProblem, problemCenter.y < palCenter.y {
+                    y = min(y, problemCenter.y - 18 - gap - half)
+                }
+                return y
+            } else {
+                var y = max(bubbleAnchor.y + 14, buttonsBottom + gap + half)
+                if clearingProblem, problemCenter.y > palCenter.y {
+                    y = max(y, problemCenter.y + 18 + gap + half)
+                }
+                return y
+            }
         }
     }
 }

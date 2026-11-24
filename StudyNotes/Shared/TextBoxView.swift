@@ -465,6 +465,26 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
         return true
     }
 
+    /// Colors all of a box's text, with undo. Returns false if it's gone.
+    @discardableResult
+    func setColor(id: UUID, to color: UIColor) -> Bool {
+        guard let box = box(id) else { return false }
+        let old = box.richText.flatMap(RichText.decode)
+            ?? NSAttributedString(string: box.plainText, attributes: [.font: TextBoxView.defaultFont])
+        let colored = NSMutableAttributedString(attributedString: old)
+        colored.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: colored.length))
+        applyText(id: id, richText: RichText.encode(colored), plainText: box.plainText)
+        // What's typed next in it comes out the same color.
+        views[id]?.textView.typingAttributes[.foregroundColor] = color
+        return true
+    }
+
+    /// The color most of a box's text is in (its first letter's).
+    func color(of id: UUID) -> UIColor? {
+        guard let text = box(id)?.richText.flatMap(RichText.decode), text.length > 0 else { return nil }
+        return text.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor
+    }
+
     private func applyText(id: UUID, richText: Data?, plainText: String) {
         guard let box = box(id) else { return }
         let previousRich = box.richText

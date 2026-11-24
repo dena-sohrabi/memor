@@ -1,9 +1,9 @@
 import SwiftData
 import SwiftUI
 
-/// Asks a window to show a page: a notebook window one of its pages, or a
-/// PDF window one of its pages. The window showing that notebook or PDF
-/// takes it; a window that has just opened for it takes it too.
+/// Asks the open notebook or PDF to show one of its pages. The screen
+/// showing that notebook or PDF takes it; one that has just opened for it
+/// takes it too.
 @MainActor
 @Observable
 final class PalNavigator {
@@ -58,7 +58,7 @@ enum PalAppTools {
                               "List a notebook's pages, in order, with their numbers and titles.",
                               ["notebook_id": notebook]),
             PalTools.function("open_item",
-                              "Open a notebook or PDF in its window (or bring its window forward), optionally at a page.",
+                              "Open a notebook or PDF on their screen, in place of what's open, optionally at a page.",
                               ["item_id": item, "page": ["type": ["integer", "null"], "description": "A page to show, from 1, or null."]]),
             PalTools.function("go_to_page",
                               "Show another page of a notebook or PDF: the one they're using unless item_id says otherwise.",
@@ -66,7 +66,7 @@ enum PalAppTools {
                                "page": pageNumber]),
             PalTools.function("create_notebook",
                               "Make a new notebook with one blank page.",
-                              ["title": ["type": "string"], "open": ["type": "boolean", "description": "Open it in a window afterwards."]]),
+                              ["title": ["type": "string"], "open": ["type": "boolean", "description": "Open it afterwards."]]),
             PalTools.function("rename_item",
                               "Rename a notebook or PDF.",
                               ["item_id": item, "title": ["type": "string"]]),
@@ -331,11 +331,9 @@ enum PalAppTools {
     private static let unknownItem = PalTools.Outcome.text("No notebook or PDF has that item_id. Call list_library for the ids.", isError: true)
     private static let noNotebook = PalTools.Outcome.text("Say which notebook (its item_id, from list_library): they aren't in one now.", isError: true)
 
-    /// Opens a window, or brings it forward.
+    /// Shows a notebook or PDF in Memor's window.
     private static func open(_ target: OpenTarget) {
-        if let openWindow = Pal.shared.openWindow {
-            openWindow(id: WindowID.item, value: target)
-        }
+        AppNavigator.shared.open(target)
     }
 
     /// Shows a card asking them to confirm, and waits.

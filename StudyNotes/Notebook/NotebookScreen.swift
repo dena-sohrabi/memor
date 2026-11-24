@@ -1,8 +1,8 @@
 import SwiftData
 import SwiftUI
 
-/// The first screen of a notebook window: its pages in a grid, like the
-/// library. Tapping a page opens it in `NotebookPageScreen`.
+/// The first screen of a notebook: its pages in a grid, like the library.
+/// Tapping a page opens it in `NotebookPageScreen`; Back goes to the library.
 struct NotebookScreen: View {
     @Bindable var notebook: Notebook
     @Environment(\.modelContext) private var modelContext
@@ -41,9 +41,6 @@ struct NotebookScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarRole(.editor)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                LibraryButton()
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { addPage() } label: {
                     Label("New page", systemImage: "plus")
@@ -62,8 +59,8 @@ struct NotebookScreen: View {
             showRequestedPage()
             reopenPageIfOneWasOpen()
         }
-        // Remembers whether a page or the grid is showing, so the window
-        // comes back the same way.
+        // Remembers whether a page or the grid is showing, so the notebook
+        // opens the same way next time.
         .onChange(of: openedPage) { _, page in
             showsPage = page != nil
         }
@@ -143,9 +140,9 @@ struct NotebookScreen: View {
         "notebook.showsPage.\(id.uuidString)"
     }
 
-    /// Whenever this window is built again (iPadOS let it go in the
-    /// background, Memor was closed and reopened, or iCloud sync redrew
-    /// it), it opens the page that was open, instead of the grid. The page
+    /// Whenever this notebook is opened again (from the library, by the
+    /// study pal, or when Memor was closed and reopened), it opens the page
+    /// that was open, instead of the grid. The page
     /// itself is `currentPageID`, which every way of changing pages keeps
     /// up to date. Going back to the grid first means it opens on the grid.
     private func reopenPageIfOneWasOpen() {

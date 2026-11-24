@@ -801,6 +801,7 @@ extension NotebookCanvasController: UIEditMenuInteractionDelegate {
 // MARK: - The study pal
 
 extension NotebookCanvasController: PalPage {
+    var palStableID: UUID { page.id }
     var palItemID: UUID { page.notebook?.id ?? page.id }
     var palKind: PalPageKind { .notebook }
     var palItemTitle: String { page.notebook?.title ?? "Untitled Notebook" }
@@ -875,6 +876,7 @@ extension NotebookCanvasController: PalPage {
                 "width": box.width.rounded(),
                 "height": textBoxes.height(of: box.id).rounded(),
                 "text": String(box.plainText.prefix(400)),
+                "color": textBoxes.color(of: box.id).map(PalColor.name) ?? "black",
             ] as [String: Any]
         }
         items += images.describeImages()
@@ -904,7 +906,7 @@ extension NotebookCanvasController: PalPage {
             .joined(separator: "\n\n")
     }
 
-    func palAddText(_ text: String, at origin: CGPoint?, in place: PalPlace) -> UUID? {
+    func palAddText(_ text: String, at origin: CGPoint?, color: UIColor?, in place: PalPlace) -> UUID? {
         let style = pageTextStyle()
         let measured = (text as NSString).boundingRect(
             with: CGSize(width: style.width - 16, height: .greatestFiniteMagnitude),
@@ -914,7 +916,7 @@ extension NotebookCanvasController: PalPage {
         )
         let size = CGSize(width: style.width, height: ceil(measured.height) + 24)
         let spot = origin ?? freeSpot(for: size, near: place.near)
-        return textBoxes.insertBox(at: spot, width: style.width, text: text, font: style.font, color: style.color)
+        return textBoxes.insertBox(at: spot, width: style.width, text: text, font: style.font, color: color ?? style.color)
     }
 
     func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
@@ -1060,6 +1062,26 @@ extension NotebookCanvasController: PalPage {
             return nil
         }
         return images.hasImage(id) ? images.deleteImage(id) : Self.unknownItem
+    }
+
+    func palHasItem(_ id: UUID) -> Bool {
+        textBoxes.box(id) != nil || images.hasImage(id)
+    }
+
+    func palRecolor(notes: [UUID], ink: [String], region: CGRect?, color: UIColor, pageIndex: Int?) -> (result: String, isError: Bool) {
+        var done: [String] = []
+        var problems: [String] = []
+        let colored = notes.filter { textBoxes.setColor(id: $0, to: color) }
+        if !colored.isEmpty { done.append("Colored \(colored.count) typed note\(colored.count == 1 ? "" : "s").") }
+        for id in notes where !colored.contains(id) {
+            problems.append(images.hasImage(id) ? "Pictures keep their own colors." : "No typed note with id \(id.uuidString) on this page.")
+        }
+        if !ink.isEmpty || region != nil {
+            let inked = palHandwriting.recolor(ids: ink, region: region, to: color, on: canvasView)
+            if inked.isError { problems.append(inked.result) } else { done.append(inked.result) }
+        }
+        guard !done.isEmpty else { return (problems.joined(separator: " "), true) }
+        return ((done + problems).joined(separator: " "), false)
     }
 
     private enum ItemKind { case text, image }

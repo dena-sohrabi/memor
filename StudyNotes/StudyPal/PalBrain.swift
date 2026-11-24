@@ -37,12 +37,13 @@ enum PalMind: String, CaseIterable, Identifiable {
 }
 
 /// The study pal's mind: one conversation for the whole app, whether you
-/// type to her or talk, in any window, with Claude Opus 5.5 or GPT-6.2 Sol.
+/// type to her or talk, wherever you are in it, with Claude Opus 5.5 or GPT-6.2 Sol.
 ///
 /// Every message you send starts with what's on your screen right then:
-/// the notebooks and PDFs open in your windows, pictures of what's on
-/// screen (when a page changed since she last saw it), their text, what
-/// you selected or circled, and what she remembers about them. So she
+/// the notebook or PDF that's open, pictures of what's on screen (when a
+/// page changed since she last saw it), their text, what you selected or
+/// circled, what she did on your pages lately, and what she remembers
+/// about them. So she
 /// always answers about what you're doing now, and the conversation itself
 /// is there for continuity. After half an hour without a message, a new
 /// talk starts; what mattered in the old one goes into her memory.
@@ -302,15 +303,19 @@ final class PalBrain {
             let library = PalLibrary.overview()
             if !library.isEmpty { overview.append(library) }
         } else {
-            if focused == nil { overview.append("They're in another window right now (the library or a page grid).") }
+            if focused == nil { overview.append("They're in the library or a notebook's page grid right now.") }
             for page in pages {
-                let role = page === focused ? "the window they're using" : "another window on screen"
+                let role = page === focused ? "on their screen" : "also open"
                 let kind = page.palKind == .notebook ? "notebook" : "PDF"
                 overview.append("- \(workspace.shortID(of: page)), \(role): \(kind) “\(page.palItemTitle)” (item_id \(page.palItemID.uuidString)), \(page.palWhere).")
                 talk.items[page.palItemID] = page.palItemTitle
             }
             if let focused { PalMemoryStore.shared.studied(focused.palItemID, title: focused.palItemTitle) }
         }
+        // So "make it green" still finds "it", after they've worked on the
+        // page themselves, or in a new talk.
+        let recent = PalRecentActions.shared.summary()
+        if !recent.isEmpty { overview.append(recent) }
         parts.append(.text(overview.joined(separator: "\n")))
 
         for page in pages {

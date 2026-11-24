@@ -33,9 +33,11 @@ enum StudyPalReaction: Equatable {
 struct StudyPalCue: Equatable {
     var id = 0
     var reaction = StudyPalReaction.wave
+    /// Only the movement, without her little sound.
+    var isSilent = false
 
-    func next(_ reaction: StudyPalReaction) -> StudyPalCue {
-        StudyPalCue(id: id + 1, reaction: reaction)
+    func next(_ reaction: StudyPalReaction, silent: Bool = false) -> StudyPalCue {
+        StudyPalCue(id: id + 1, reaction: reaction, isSilent: silent)
     }
 }
 
@@ -499,14 +501,17 @@ final class StudyPalSceneView: UIView {
         }
         playedCueID = cue.id
         lastReaction = .now
-        // The wave when a page opens (the first cue) is silent.
-        switch cue.reaction {
-        case .wave: if cue.id > 0 { voice.play(.hello) }
-        case .listen: voice.play(.listening)
-        case .delight: voice.play(.happy)
-        case .sad: voice.play(.sad)
-        case .poke: voice.play(Bool.random() ? .mrrp : .happy)
-        case .nod: break
+        // The wave when she first shows (the first cue) is silent, and so
+        // is any cue marked silent, like her coming back on screen.
+        if !cue.isSilent {
+            switch cue.reaction {
+            case .wave: if cue.id > 0 { voice.play(.hello) }
+            case .listen: voice.play(.listening)
+            case .delight: voice.play(.happy)
+            case .sad: voice.play(.sad)
+            case .poke: voice.play(Bool.random() ? .mrrp : .happy)
+            case .nod: break
+            }
         }
         // Keep her calm for people who asked for less motion.
         guard !UIAccessibility.isReduceMotionEnabled else { return }

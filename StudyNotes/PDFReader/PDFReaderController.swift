@@ -644,6 +644,7 @@ extension PDFReaderController: UIGestureRecognizerDelegate {
 /// them, and can write, mark and highlight. The PDF file itself and your
 /// own ink stay as they are.
 extension PDFReaderController: PalPage {
+    var palStableID: UUID { item.id }
     var palItemID: UUID { item.id }
     var palKind: PalPageKind { .pdf }
     var palItemTitle: String { item.title }
@@ -833,6 +834,7 @@ extension PDFReaderController: PalPage {
                     "width": box.width.rounded(),
                     "height": textBoxes.height(of: box.id).rounded(),
                     "text": String(box.plainText.prefix(400)),
+                    "color": textBoxes.color(of: box.id).map(PalColor.name) ?? "black",
                 ] as [String: Any]
             }
         let words = handwriting(on: index).list(ink(on: index), within: nil).map { word -> [String: Any] in
@@ -882,7 +884,7 @@ extension PDFReaderController: PalPage {
         return kept
     }
 
-    func palAddText(_ text: String, at origin: CGPoint?, in place: PalPlace) -> UUID? {
+    func palAddText(_ text: String, at origin: CGPoint?, color: UIColor?, in place: PalPlace) -> UUID? {
         let index = pageIndex(place.pageIndex)
         guard overlays[index] != nil else { return nil }
         let width: CGFloat = 260
@@ -894,7 +896,7 @@ extension PDFReaderController: PalPage {
         )
         let size = CGSize(width: width, height: ceil(measured.height) + 24)
         let spot = origin.map { clamped($0, size: size, on: index) } ?? freeSpot(for: size, on: index, near: place.near)
-        return textBoxes.insertBox(at: spot, width: width, text: text, pageIndex: index)
+        return textBoxes.insertBox(at: spot, width: width, text: text, pageIndex: index, color: color ?? .black)
     }
 
     func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID? { nil }
@@ -990,6 +992,31 @@ extension PDFReaderController: PalPage {
         guard textBoxes.box(id) != nil else { return Self.unknownNote }
         textBoxes.removeBox(id: id, undoable: true)
         return nil
+    }
+
+    func palHasItem(_ id: UUID) -> Bool {
+        textBoxes.box(id) != nil
+    }
+
+    func palRecolor(notes: [UUID], ink: [String], region: CGRect?, color: UIColor, pageIndex index: Int?) -> (result: String, isError: Bool) {
+        var done: [String] = []
+        var problems: [String] = []
+        let colored = notes.filter { textBoxes.setColor(id: $0, to: color) }
+        if !colored.isEmpty { done.append("Colored \(colored.count) typed note\(colored.count == 1 ? "" : "s").") }
+        for id in notes where !colored.contains(id) {
+            problems.append("No typed note with id \(id.uuidString) in this PDF.")
+        }
+        if !ink.isEmpty || region != nil {
+            let index = pageIndex(index)
+            if let overlay = overlays[index] {
+                let inked = handwriting(on: index).recolor(ids: ink, region: region, to: color, on: overlay.canvasView)
+                if inked.isError { problems.append(inked.result) } else { done.append(inked.result) }
+            } else {
+                problems.append("Page \(index + 1) isn't on screen, so its ink wasn't colored. Go to it first (go_to_page).")
+            }
+        }
+        guard !done.isEmpty else { return (problems.joined(separator: " "), true) }
+        return ((done + problems).joined(separator: " "), false)
     }
 
     private static let unknownNote = "No typed note with that id. Call get_page_items for the current ids."

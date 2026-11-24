@@ -50,6 +50,10 @@ struct PalPlace {
 protocol PalPage: AnyObject {
     /// This open page, for as long as it's open.
     var palPageID: UUID { get }
+    /// What's open, the same every time it's opened: the notebook page's
+    /// id, or the PDF's. So it keeps its short name (N1, P1) when you go
+    /// back to it.
+    var palStableID: UUID { get }
     /// The notebook or PDF, for what she remembers about it.
     var palItemID: UUID { get }
     var palKind: PalPageKind { get }
@@ -94,8 +98,8 @@ protocol PalPage: AnyObject {
     func palNotes(pageIndex: Int?) -> String
 
     /// Adds a typed note, at `origin` or in free space beside `place.near`
-    /// (or in view). Returns its id.
-    func palAddText(_ text: String, at origin: CGPoint?, in place: PalPlace) -> UUID?
+    /// (or in view), in `color` (or the page's own). Returns its id.
+    func palAddText(_ text: String, at origin: CGPoint?, color: UIColor?, in place: PalPlace) -> UUID?
     /// Adds a picture in free space beside `place.near`, or in view.
     func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID?
     /// Writes by hand. Returns what happened, for her.
@@ -106,6 +110,11 @@ protocol PalPage: AnyObject {
     func palResizeItem(_ id: UUID, width: CGFloat) -> String?
     func palEditText(_ id: UUID, text: String) -> String?
     func palDeleteItem(_ id: UUID) -> String?
+    /// A typed note or picture with this id is on this page.
+    func palHasItem(_ id: UUID) -> Bool
+    /// Changes the color of typed notes (by id), and of ink: handwritten
+    /// words by id, or every stroke mostly inside `region` (theirs or hers).
+    func palRecolor(notes: [UUID], ink: [String], region: CGRect?, color: UIColor, pageIndex: Int?) -> (result: String, isError: Bool)
 
     /// The text of some of a PDF's pages (from 0). Nil on a notebook.
     func palReadPages(_ pages: ClosedRange<Int>) -> String?
@@ -134,9 +143,8 @@ enum PalJSON {
     }
 }
 
-/// Every page open in Memor's windows, and which window the study pal is
-/// in. There's one study pal for the whole app: she sits in the window you
-/// used last, and sees the pages in all of them.
+/// Every page open in Memor, and which window the study pal is in. There's
+/// one study pal for the whole app, and she sees every open page.
 @MainActor
 @Observable
 final class PalWorkspace {
@@ -154,6 +162,10 @@ final class PalWorkspace {
 
     @ObservationIgnored private var entries: [UUID: Entry] = [:]
     @ObservationIgnored private var counters: [PalPageKind: Int] = [:]
+    /// Short names by `palStableID`, so a notebook page or PDF keeps its
+    /// name ("N1") when you leave it and come back, and what she did on it
+    /// earlier in the talk still points at it.
+    @ObservationIgnored private var names: [UUID: String] = [:]
     /// Memor's windows that have her overlay.
     @ObservationIgnored private var windows: [ObjectIdentifier: KnownWindow] = [:]
     /// The window you used last.
@@ -193,10 +205,21 @@ final class PalWorkspace {
     func register(_ page: PalPage) {
         prune()
         guard entries[page.palPageID] == nil else { return }
-        let prefix = page.palKind == .notebook ? "N" : "P"
-        let number = (counters[page.palKind] ?? 0) + 1
-        counters[page.palKind] = number
-        entries[page.palPageID] = Entry(page: page, shortID: "\(prefix)\(number)")
+        let stableID = page.palStableID
+        // The same page, opened again before the old one closed: the new one
+        // is the one on screen.
+        entries = entries.filter { $0.value.page?.palStableID != stableID }
+        let shortID: String
+        if let known = names[stableID] {
+            shortID = known
+        } else {
+            let prefix = page.palKind == .notebook ? "N" : "P"
+            let number = (counters[page.palKind] ?? 0) + 1
+            counters[page.palKind] = number
+            shortID = "\(prefix)\(number)"
+            names[stableID] = shortID
+        }
+        entries[page.palPageID] = Entry(page: page, shortID: shortID)
         changes += 1
     }
 

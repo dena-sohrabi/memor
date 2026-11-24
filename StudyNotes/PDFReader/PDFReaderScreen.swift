@@ -167,8 +167,7 @@ struct PDFReaderScreen: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItemGroup(placement: .topBarLeading) {
-            LibraryButton()
+        ToolbarItem(placement: .topBarLeading) {
             Button { editor.showsPageSidebar.toggle() } label: {
                 Label("Pages", systemImage: "sidebar.left")
             }

@@ -2,10 +2,11 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The first screen: notebooks on top, PDFs below, each opening in its own window.
+/// The first screen: notebooks on top, PDFs below. Tapping one opens it
+/// in this same window; Back returns here.
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.openWindow) private var openWindow
+    @Bindable private var navigator = AppNavigator.shared
 
     @Query(sort: \Notebook.modifiedAt, order: .reverse) private var notebooks: [Notebook]
     @Query(sort: \PDFItem.lastOpenedAt, order: .reverse) private var pdfs: [PDFItem]
@@ -21,7 +22,7 @@ struct LibraryView: View {
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 20, alignment: .top)]
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigator.path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
                     section("Notebooks") {
@@ -46,6 +47,19 @@ struct LibraryView: View {
                 }
                 .padding(24)
             }
+            // PDFs dropped on the library, not on an open notebook or PDF.
+            .dropDestination(for: PDFDrop.self) { drops, _ in
+                importPDFs(drops.map(\.url), openAfterImport: false, removeSourcesAfterImport: true)
+                return !drops.isEmpty
+            } isTargeted: { isDropTargeted = $0 }
+            .overlay {
+                if isDropTargeted {
+                    RoundedRectangle(cornerRadius: 24)
+                        .strokeBorder(.tint, lineWidth: 3)
+                        .padding(8)
+                        .allowsHitTesting(false)
+                }
+            }
             .navigationTitle("Memor")
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -67,6 +81,9 @@ struct LibraryView: View {
             .sheet(isPresented: $showsSettings) {
                 SettingsView()
             }
+            .navigationDestination(for: OpenTarget.self) { target in
+                ItemScreen(target: target)
+            }
         }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
@@ -76,26 +93,13 @@ struct LibraryView: View {
                 importMessage = error.localizedDescription
             }
         }
-        .dropDestination(for: PDFDrop.self) { drops, _ in
-            importPDFs(drops.map(\.url), openAfterImport: false, removeSourcesAfterImport: true)
-            return !drops.isEmpty
-        } isTargeted: { isDropTargeted = $0 }
-        .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 24)
-                    .strokeBorder(.tint, lineWidth: 3)
-                    .padding(8)
-                    .allowsHitTesting(false)
-            }
-        }
-        // The study pal, while this is the window you're using.
+        // The study pal, over the library and whatever is open on top of it.
         .overlay { PalOverlay() }
         // "Open in Memor" from Files, Mail or Safari. The system hands
         // over a copy in the Inbox folder, which is removed after importing.
         .onOpenURL { url in
             importPDFs([url], openAfterImport: true, removeSourcesAfterImport: url.pathComponents.contains("Inbox"))
         }
-        .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         .alert("Rename", isPresented: isRenaming, presenting: renameTarget) { item in
             TextField("Name", text: $renameText)
             Button("Save") { rename(item, to: renameText) }
@@ -133,7 +137,7 @@ struct LibraryView: View {
     @ViewBuilder
     private func menu(for item: LibraryItem) -> some View {
         Button { open(item.target) } label: {
-            Label("Open", systemImage: "macwindow.badge.plus")
+            Label("Open", systemImage: "arrow.up.forward.square")
         }
         Button {
             renameText = item.title
@@ -149,7 +153,7 @@ struct LibraryView: View {
     // MARK: Actions
 
     private func open(_ target: OpenTarget) {
-        openWindow(id: WindowID.item, value: target)
+        navigator.open(target)
     }
 
     private func createNotebook() {

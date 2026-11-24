@@ -115,7 +115,7 @@ enum PalTools {
                       "color": color]),
             function("add_note",
                      "Add a typed note to the page, in the page's own text style. For longer text, or where their notes are typed. Plain text with simple line breaks.",
-                     ["page": page, "pdf_page": pdfPage, "text": text("The note."), "x": x, "y": y]),
+                     ["page": page, "pdf_page": pdfPage, "text": text("The note."), "x": x, "y": y, "color": color]),
             function("mark",
                      "Draw a hand-drawn mark on the page, in ink: circle, underline, double_underline, box or strike around an area; check or cross beside it; bracket on its left; or an arrow from the area to a point (to_x, to_y). Use it to point at things, like a mistake (red) or what's right (green).",
                      ["page": page, "pdf_page": pdfPage,
@@ -131,8 +131,15 @@ enum PalTools {
                      "Change the width of a typed note or picture, in page points. Pictures keep their shape; notes rewrap.",
                      ["page": page, "id": id, "width": number]),
             function("edit_text",
-                     "Replace all the text of a typed note, to fix, rewrite, shorten or translate it.",
+                     "Replace all the text of a typed note, to fix, rewrite, shorten or translate it. It keeps its color; to change the color, use recolor.",
                      ["page": page, "id": id, "text": text("The note's new text, in full.")]),
+            function("recolor",
+                     "Change the color of things on a page: typed notes by their ids (from get_page_items, or from when you added them), handwritten words by their ids (h12, from look_at with label_handwriting or get_page_items), or all the writing inside an area (x, y, width, height). Works on their notes and writing and on what you added, wrote or drew. Undo puts the old color back.",
+                     ["page": page, "pdf_page": pdfPage,
+                      "ids": ["type": "array", "items": ["type": "string"], "description": "Typed note ids and/or handwritten word ids. Empty to color everything written inside the area."],
+                      "x": ["type": ["number", "null"]], "y": ["type": ["number", "null"]],
+                      "width": ["type": ["number", "null"]], "height": ["type": ["number", "null"]],
+                      "color": ["type": "string", "description": "red, green, blue, orange, purple, pink, black or gray, or #RRGGBB."]]),
             function("delete_item",
                      "Delete a typed note or picture. Only when they ask you to remove something.",
                      ["page": page, "id": id]),
@@ -229,6 +236,7 @@ enum PalTools {
         case "mark": PalActivity(text: "Marking your page…", symbol: "scribble")
         case "move_item", "resize_item": PalActivity(text: "Moving things around…", symbol: "arrow.up.and.down.and.arrow.left.and.right")
         case "edit_text": PalActivity(text: "Editing a note…", symbol: "pencil")
+        case "recolor": PalActivity(text: "Changing the color…", symbol: "paintpalette")
         case "delete_item": PalActivity(text: "Removing something…", symbol: "trash")
         case "highlight_text": PalActivity(text: "Highlighting…", symbol: "highlighter")
         case "read_pages": PalActivity(text: "Reading…", symbol: "book")
@@ -250,6 +258,10 @@ enum PalTools {
             return .text("The arguments weren't valid JSON.", isError: true)
         }
         if let outcome = await PalAppTools.run(name: name, input: input, context: context) {
+            // What she did in the library, like opening a notebook.
+            if !outcome.isError, !["list_library", "list_pages"].contains(name), let text = outcome.output as? String {
+                PalRecentActions.shared.record(text)
+            }
             return outcome
         }
         switch name {
@@ -272,10 +284,17 @@ enum PalTools {
             break
         }
 
-        guard let page = openPage(for: input) else {
+        guard let page = pageWithItems(name, input) ?? openPage(for: input) else {
             return .text(input["page"] is String ? "No open page is called that. The open pages are listed with their names at the top of the message." : "No notebook page or PDF is open right now.", isError: true)
         }
         let place = placement(for: input, on: page, circle: context.circle)
+        let outcome = runOnPage(name, input, page: page, place: place)
+        record(name, input, outcome, on: page, pageIndex: place.pageIndex)
+        return outcome
+    }
+
+    /// A tool that works on one open page.
+    private static func runOnPage(_ name: String, _ input: [String: Any], page: PalPage, place: PalPlace) -> Outcome {
         switch name {
         case "look_at":
             return look(at: input, on: page, in: place)
@@ -327,7 +346,7 @@ enum PalTools {
 
         case "add_note":
             guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be a non-empty string.", isError: true) }
-            guard let id = page.palAddText(text, at: point(input["x"], input["y"]), in: place) else {
+            guard let id = page.palAddText(text, at: point(input["x"], input["y"]), color: PalColor.parse(string(input["color"])), in: place) else {
                 return .text("Couldn't add the note there. The page has to be on screen.", isError: true)
             }
             return .text("Added a typed note with id \(id.uuidString).", changedPage: true)
@@ -363,6 +382,18 @@ enum PalTools {
         case "delete_item":
             guard let id = itemID(input) else { return .text("`id` must be an item id.", isError: true) }
             return changed(page.palDeleteItem(id), "Deleted it. They can undo this.")
+
+        case "recolor":
+            guard let color = PalColor.parse(string(input["color"])) else {
+                return .text("`color` must be red, green, blue, orange, purple, pink, black, gray or #RRGGBB.", isError: true)
+            }
+            let (notes, ink) = splitIDs(input)
+            let region = area(input)
+            guard !notes.isEmpty || !ink.isEmpty || region != nil else {
+                return .text("Give ids, or an area (x, y, width and height).", isError: true)
+            }
+            let recolored = page.palRecolor(notes: notes, ink: ink, region: region, color: color, pageIndex: place.pageIndex)
+            return .text(recolored.result, isError: recolored.isError, changedPage: !recolored.isError)
 
         case "highlight_text":
             guard let text = string(input["text"]), !text.isEmpty else { return .text("`text` must be the text to highlight.", isError: true) }
@@ -443,7 +474,9 @@ enum PalTools {
             guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
                 return .text("Couldn't add the picture. The page may have closed.", isError: true)
             }
-            return .text("Added a picture with id \(id.uuidString).", changedPage: true)
+            let outcome = Outcome.text("Added a picture with id \(id.uuidString).", changedPage: true)
+            record("add_image_from_web", input, outcome, on: page, pageIndex: nil)
+            return outcome
         } catch {
             return .text("\(error.localizedDescription) Try another link.", isError: true)
         }
@@ -461,12 +494,44 @@ enum PalTools {
             guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
                 return .text("Couldn't add the picture. The page may have closed.", isError: true)
             }
-            return .text("Drew a picture and added it with id \(id.uuidString).", changedPage: true)
+            let outcome = Outcome.text("Drew a picture and added it with id \(id.uuidString).", changedPage: true)
+            record("draw_picture", input, outcome, on: page, pageIndex: nil)
+            return outcome
         } catch is CancellationError {
             return .text("Stopped.", isError: true)
         } catch {
             return .text("Couldn't draw it: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    // MARK: What she did
+
+    /// Keeps a change she made, with where it was, so she can come back to
+    /// it later ("make it green").
+    private static func record(_ name: String, _ input: [String: Any], _ outcome: Outcome, on page: PalPage, pageIndex: Int?) {
+        guard outcome.changedPage, !outcome.isError else { return }
+        let kind = page.palKind == .notebook ? "notebook" : "PDF"
+        let spot = page.palKind == .pdf ? pageIndex.map { "page \($0 + 1)" } ?? page.palWhere : page.palWhere
+        let place = "\(PalWorkspace.shared.shortID(of: page)), \(kind) “\(page.palItemTitle)”, \(spot)"
+        var what = [name]
+        if let text = string(input["text"]), !text.isEmpty {
+            what.append("“\(text.prefix(120))\(text.count > 120 ? "…" : "")”")
+        }
+        if let description = string(input["description"]), !description.isEmpty {
+            what.append("“\(description.prefix(80))”")
+        }
+        if let mark = string(input["kind"]) { what.append(mark) }
+        if let id = string(input["id"]) { what.append("id \(id)") }
+        let ids = (input["ids"] as? [Any] ?? []).compactMap { $0 as? String }
+        if !ids.isEmpty { what.append("ids \(ids.joined(separator: ", "))") }
+        if let region = area(input) {
+            what.append("area x \(Int(region.minX)), y \(Int(region.minY)), width \(Int(region.width)), height \(Int(region.height))")
+        } else if let origin = point(input["x"], input["y"]) {
+            what.append("at x \(Int(origin.x)), y \(Int(origin.y))")
+        }
+        if let color = string(input["color"]), !color.isEmpty { what.append("in \(color)") }
+        let result = outcome.output as? String ?? ""
+        PalRecentActions.shared.record("\(place): \(what.joined(separator: " ")) → \(result)")
     }
 
     // MARK: Reading arguments
@@ -477,6 +542,34 @@ enum PalTools {
             return PalWorkspace.shared.page(shortID: name)
         }
         return PalWorkspace.shared.focusedPage ?? PalWorkspace.shared.visiblePages.first
+    }
+
+    /// For tools that change typed notes or pictures by id: the open page
+    /// they're on, whatever `page` says, so an id from earlier in the talk
+    /// still works. Nil for other tools, or when no open page has them.
+    private static func pageWithItems(_ name: String, _ input: [String: Any]) -> PalPage? {
+        let ids: [UUID]
+        switch name {
+        case "move_item", "resize_item", "edit_text", "delete_item": ids = itemID(input).map { [$0] } ?? []
+        case "recolor": ids = splitIDs(input).notes
+        default: return nil
+        }
+        guard !ids.isEmpty else { return nil }
+        let holds: (PalPage) -> Bool = { page in ids.contains { page.palHasItem($0) } }
+        if let named = openPage(for: input), holds(named) { return named }
+        return PalWorkspace.shared.openPages.first(where: holds)
+    }
+
+    /// `ids` split into typed note and picture ids (UUIDs) and handwritten
+    /// word ids (h12).
+    private static func splitIDs(_ input: [String: Any]) -> (notes: [UUID], ink: [String]) {
+        var notes: [UUID] = []
+        var ink: [String] = []
+        for case let id as String in input["ids"] as? [Any] ?? [] {
+            let id = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let uuid = UUID(uuidString: id) { notes.append(uuid) } else if !id.isEmpty { ink.append(id) }
+        }
+        return (notes, ink)
     }
 
     /// Which PDF page, and what to put things beside: what they circled,
@@ -531,6 +624,21 @@ enum PalTools {
 
 /// Ink colors she can name.
 enum PalColor {
+    private static let names = ["red", "green", "blue", "orange", "purple", "pink", "black", "gray"]
+
+    /// A color as she'd say it: one of hers, or #RRGGBB.
+    static func name(_ color: UIColor) -> String {
+        let code = hex(color)
+        return names.first { parse($0).map(hex) == code } ?? code
+    }
+
+    private static func hex(_ color: UIColor) -> String {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        let byte: (CGFloat) -> Int = { Int((min(max($0, 0), 1) * 255).rounded()) }
+        return String(format: "#%02X%02X%02X", byte(red), byte(green), byte(blue))
+    }
+
     static let red = UIColor(red: 0.89, green: 0.22, blue: 0.24, alpha: 1)
     static let green = UIColor(red: 0.13, green: 0.62, blue: 0.33, alpha: 1)
 
