@@ -16,13 +16,25 @@ struct StudyNotesApp: App {
     }
 
     var body: some Scene {
-        // Each window has its own tabs (see `Workspace`). Windows open only
-        // when you ask: Open in New Window, or the system's New Window.
-        WindowGroup(for: MemorWindow.self) { $window in
-            WorkspaceView(window: window)
+        // The main window: the library, with notebooks and PDFs opening on
+        // top of it (see `AppNavigator`). It always shows the same value, so
+        // asking for it again brings it forward instead of a second one.
+        // "Open in Memor" from other apps comes here.
+        WindowGroup("Memor", id: WindowID.main, for: MainWindow.self) { _ in
+            LibraryView()
         } defaultValue: {
-            MemorWindow()
+            .main
         }
         .modelContainer(container)
+        .handlesExternalEvents(matching: ["*"])
+
+        // A notebook or PDF in a window of its own, only when you ask (Open
+        // in New Window). Asking again for one that's open brings its window
+        // forward.
+        WindowGroup("Notebook or PDF", id: WindowID.item, for: OpenTarget.self) { $target in
+            ItemWindow(target: target)
+        }
+        .modelContainer(container)
+        .handlesExternalEvents(matching: [])
     }
 }

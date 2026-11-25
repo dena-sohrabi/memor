@@ -1,6 +1,6 @@
 import UIKit
 
-/// What a side of a tab shows: a notebook page or a PDF.
+/// What a window shows: a notebook page or a PDF.
 enum PalPageKind {
     case notebook, pdf
 }
@@ -144,8 +144,7 @@ enum PalJSON {
 }
 
 /// Every page open in Memor, and which window the study pal is in. There's
-/// one study pal for the whole app, and she sees every open page. In a tab
-/// with two items, she works on the side you're using.
+/// one study pal for the whole app, and she sees every open page.
 @MainActor
 @Observable
 final class PalWorkspace {
@@ -230,21 +229,13 @@ final class PalWorkspace {
         changes += 1
     }
 
-    /// The page you're using: in the window you're using, on the side of
-    /// its tab you touched last.
+    /// The page in the window you're using, if it shows one.
     var focusedPage: PalPage? {
-        guard let activeWindow else { return nil }
-        let inWindow = openPages.filter { page in page.palWindow.map { ObjectIdentifier($0) } == activeWindow }
-        if let target = WorkspaceRegistry.shared.workspace(in: activeWindow)?.activeTarget,
-           let page = inWindow.first(where: { $0.palItemID == target.id }) {
+        let pages = openPages
+        if let activeWindow, let page = pages.first(where: { page in page.palWindow.map { ObjectIdentifier($0) } == activeWindow }) {
             return page
         }
-        return inWindow.first
-    }
-
-    /// You started using the other side of a tab, or another tab.
-    func focusChanged() {
-        changes += 1
+        return nil
     }
 
     /// Pages in windows on screen now: the one you're using first.

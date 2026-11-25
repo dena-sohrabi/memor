@@ -2,14 +2,15 @@ import SwiftData
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The first screen: notebooks on top, PDFs below. Tapping one opens it in
-/// a tab (or goes to its tab). Touch and hold one to open it beside the tab
-/// you were in, or in a new window.
+/// The first screen: notebooks on top, PDFs below. Tapping one opens it
+/// in this same window; Back returns here. Touch and hold one for Open in
+/// New Window, to put it in a window of its own.
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.workspace) private var workspace
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.scenePhase) private var scenePhase
+    @Bindable private var navigator = AppNavigator.shared
 
     @Query(sort: \Notebook.modifiedAt, order: .reverse) private var notebooks: [Notebook]
     @Query(sort: \PDFItem.lastOpenedAt, order: .reverse) private var pdfs: [PDFItem]
@@ -25,7 +26,7 @@ struct LibraryView: View {
     private let columns = [GridItem(.adaptive(minimum: 170, maximum: 240), spacing: 20, alignment: .top)]
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigator.path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
                     section("Notebooks") {
@@ -52,7 +53,7 @@ struct LibraryView: View {
             }
             // PDFs dropped on the library, not on an open notebook or PDF.
             .dropDestination(for: PDFDrop.self) { drops, _ in
-                importPDFs(drops.map(\.url), removeSourcesAfterImport: true)
+                importPDFs(drops.map(\.url), openAfterImport: false, removeSourcesAfterImport: true)
                 return !drops.isEmpty
             } isTargeted: { isDropTargeted = $0 }
             .overlay {
@@ -84,14 +85,31 @@ struct LibraryView: View {
             .sheet(isPresented: $showsSettings) {
                 SettingsView()
             }
+            .navigationDestination(for: OpenTarget.self) { target in
+                ItemScreen(target: target)
+            }
         }
         .fileImporter(isPresented: $showsImporter, allowedContentTypes: [.pdf], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls):
-                importPDFs(urls)
+                importPDFs(urls, openAfterImport: false)
             case .failure(let error):
                 importMessage = error.localizedDescription
             }
+        }
+        // The study pal, over the library and whatever is open on top of it.
+        .overlay { PalOverlay() }
+        // "Open in Memor" from Files, Mail or Safari. The system hands
+        // over a copy in the Inbox folder, which is removed after importing.
+        .onOpenURL { url in
+            importPDFs([url], openAfterImport: true, removeSourcesAfterImport: url.pathComponents.contains("Inbox"))
+        }
+        // The main window takes it, instead of a second one opening for it.
+        .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+        // The window you're using opens windows (another may have closed).
+        .onAppear { navigator.openWindow = openWindow }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { navigator.openWindow = openWindow }
         }
         .alert("Rename", isPresented: isRenaming, presenting: renameTarget) { item in
             TextField("Name", text: $renameText)
@@ -132,21 +150,11 @@ struct LibraryView: View {
         Button { open(item.target) } label: {
             Label("Open", systemImage: "arrow.up.forward.square")
         }
-        if let workspace, let base = workspace.besideTab, !base.contains(item.target) {
-            Button {
-                workspace.openBeside(item.target)
-            } label: {
-                Label(titles.besideLabel(for: base), systemImage: "rectangle.split.2x1")
-            }
-        }
-        if let workspace, supportsMultipleWindows {
-            Button {
-                openWindow(value: workspace.newWindow(with: WorkspaceTab(item.target)))
-            } label: {
+        if supportsMultipleWindows {
+            Button { navigator.openInNewWindow(item.target) } label: {
                 Label("Open in New Window", systemImage: "macwindow.badge.plus")
             }
         }
-        Divider()
         Button {
             renameText = item.title
             renameTarget = item
@@ -161,11 +169,7 @@ struct LibraryView: View {
     // MARK: Actions
 
     private func open(_ target: OpenTarget) {
-        workspace?.open(target)
-    }
-
-    private var titles: ItemTitles {
-        ItemTitles(notebooks: notebooks, pdfs: pdfs)
+        navigator.open(target)
     }
 
     private func createNotebook() {
@@ -177,10 +181,25 @@ struct LibraryView: View {
         open(.notebook(notebook.id))
     }
 
-    private func importPDFs(_ urls: [URL], removeSourcesAfterImport: Bool = false) {
+    private func importPDFs(_ urls: [URL], openAfterImport: Bool, removeSourcesAfterImport: Bool = false) {
         Task {
-            let result = await LibraryImport.importPDFs(urls, into: modelContext, removingSources: removeSourcesAfterImport)
-            importMessage = result.failureMessage
+            var failedNames: [String] = []
+            for url in urls {
+                do {
+                    let imported = try await Task.detached { try PDFImporter.importFile(at: url) }.value
+                    let item = PDFItem(id: imported.id, title: imported.title, fileName: imported.fileName, pageCount: imported.pageCount)
+                    item.fileData = imported.data
+                    modelContext.insert(item)
+                    try? modelContext.save()
+                    if openAfterImport { open(.pdf(item.id)) }
+                } catch {
+                    failedNames.append(url.lastPathComponent)
+                }
+                if removeSourcesAfterImport { FileStore.removeItem(at: url) }
+            }
+            if !failedNames.isEmpty {
+                importMessage = "\(failedNames.formatted()) couldn't be read as a PDF."
+            }
         }
     }
 
@@ -195,8 +214,6 @@ struct LibraryView: View {
     }
 
     private func delete(_ item: LibraryItem) {
-        // Its tabs close, in every window.
-        WorkspaceRegistry.shared.removeEverywhere(item.target)
         switch item {
         case .notebook(let notebook):
             FileStore.removeItem(at: FileStore.thumbnailURL(for: notebook.id))
@@ -224,41 +241,6 @@ struct LibraryView: View {
 
     private var showsImportMessage: Binding<Bool> {
         Binding(get: { importMessage != nil }, set: { if !$0 { importMessage = nil } })
-    }
-}
-
-/// Copies PDFs into the library.
-@MainActor
-enum LibraryImport {
-    struct Result {
-        /// The new PDFs, in order.
-        var ids: [UUID] = []
-        /// Why some files didn't come in, or nil.
-        var failureMessage: String?
-    }
-
-    /// `removingSources`: the files were copies handed over by the system or
-    /// a drop, and are deleted afterwards.
-    static func importPDFs(_ urls: [URL], into modelContext: ModelContext, removingSources: Bool) async -> Result {
-        var result = Result()
-        var failedNames: [String] = []
-        for url in urls {
-            do {
-                let imported = try await Task.detached { try PDFImporter.importFile(at: url) }.value
-                let item = PDFItem(id: imported.id, title: imported.title, fileName: imported.fileName, pageCount: imported.pageCount)
-                item.fileData = imported.data
-                modelContext.insert(item)
-                try? modelContext.save()
-                result.ids.append(item.id)
-            } catch {
-                failedNames.append(url.lastPathComponent)
-            }
-            if removingSources { FileStore.removeItem(at: url) }
-        }
-        if !failedNames.isEmpty {
-            result.failureMessage = "\(failedNames.formatted()) couldn't be read as a PDF."
-        }
-        return result
     }
 }
 

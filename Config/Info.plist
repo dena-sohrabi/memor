@@ -30,18 +30,5 @@
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<true/>
 	</dict>
-	<key>UTExportedTypeDeclarations</key>
-	<array>
-		<dict>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.data</string>
-			</array>
-			<key>UTTypeDescription</key>
-			<string>Memor Tab</string>
-			<key>UTTypeIdentifier</key>
-			<string>com.denasohrabi.memor.tab</string>
-		</dict>
-	</array>
 </dict>
 </plist>

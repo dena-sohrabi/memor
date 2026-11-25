@@ -58,10 +58,10 @@ enum PalAppTools {
                               "List a notebook's pages, in order, with their numbers and titles.",
                               ["notebook_id": notebook]),
             PalTools.function("open_item",
-                              "Open a notebook or PDF in a tab (or go to its tab), optionally at a page. With beside, it opens side by side with the one they're using instead, like their notes next to a PDF.",
+                              "Open a notebook or PDF on their screen, in place of what's open (or bring forward its own window, if it has one), optionally at a page. With new_window, it opens in a window of its own instead, so they can put it beside another.",
                               ["item_id": item,
                                "page": ["type": ["integer", "null"], "description": "A page to show, from 1, or null."],
-                               "beside": ["type": "boolean", "description": "Show it beside the notebook or PDF they're using, side by side in one tab."]]),
+                               "new_window": ["type": "boolean", "description": "Open it in a window of its own. Only when they ask for a new window."]]),
             PalTools.function("go_to_page",
                               "Show another page of a notebook or PDF: the one they're using unless item_id says otherwise.",
                               ["item_id": ["type": ["string", "null"], "description": "The notebook's or PDF's item_id, or null for the one they're using."],
@@ -151,20 +151,21 @@ enum PalAppTools {
     private static func openItem(_ input: [String: Any], _ context: ModelContext) -> PalTools.Outcome {
         guard let id = uuid(input["item_id"]) else { return .text("`item_id` must be an item_id from list_library.", isError: true) }
         let page = number(input["page"])
-        let beside = input["beside"] as? Bool == true
+        let newWindow = input["new_window"] as? Bool == true
+        let how = newWindow ? " in a window of its own" : ""
         if let notebook = fetchNotebook(id, context) {
             if let page {
                 guard let target = notebook.sortedPages[safe: page - 1] else { return .text("“\(notebook.title)” has only \(notebook.sortedPages.count) pages.", isError: true) }
                 notebook.currentPageID = target.id
                 PalNavigator.shared.show(notebook: notebook.id, page: target.id)
             }
-            open(.notebook(notebook.id), beside: beside)
-            return .text("Opened “\(notebook.title)”\(beside ? " beside what they're using" : "")\(page.map { " at page \($0)" } ?? "").")
+            open(.notebook(notebook.id), inNewWindow: newWindow)
+            return .text("Opened “\(notebook.title)”\(how)\(page.map { " at page \($0)" } ?? "").")
         }
         if let pdf = fetchPDF(id, context) {
             if let page { PalNavigator.shared.show(pdf: pdf.id, pageIndex: max(page - 1, 0)) }
-            open(.pdf(pdf.id), beside: beside)
-            return .text("Opened “\(pdf.title)”\(beside ? " beside what they're using" : "")\(page.map { " at page \($0)" } ?? "").")
+            open(.pdf(pdf.id), inNewWindow: newWindow)
+            return .text("Opened “\(pdf.title)”\(how)\(page.map { " at page \($0)" } ?? "").")
         }
         return unknownItem
     }
@@ -227,7 +228,6 @@ enum PalAppTools {
                 return .text("They didn't confirm, so “\(title)” wasn't deleted.")
             }
             guard let notebook = fetchNotebook(id, context) else { return unknownItem }
-            WorkspaceRegistry.shared.removeEverywhere(.notebook(notebook.id))
             FileStore.removeItem(at: FileStore.thumbnailURL(for: notebook.id))
             for page in notebook.pages ?? [] {
                 FileStore.removeItem(at: FileStore.thumbnailURL(for: page.id))
@@ -242,7 +242,6 @@ enum PalAppTools {
                 return .text("They didn't confirm, so “\(title)” wasn't deleted.")
             }
             guard let pdf = fetchPDF(id, context) else { return unknownItem }
-            WorkspaceRegistry.shared.removeEverywhere(.pdf(pdf.id))
             FileStore.removeItem(at: FileStore.pdfURL(fileName: pdf.fileName))
             FileStore.removeItem(at: FileStore.thumbnailURL(for: pdf.id))
             context.delete(pdf)
@@ -336,14 +335,15 @@ enum PalAppTools {
     private static let unknownItem = PalTools.Outcome.text("No notebook or PDF has that item_id. Call list_library for the ids.", isError: true)
     private static let noNotebook = PalTools.Outcome.text("Say which notebook (its item_id, from list_library): they aren't in one now.", isError: true)
 
-    /// Shows a notebook or PDF in the window you're using: in its tab, or
-    /// beside the one you're using.
-    private static func open(_ target: OpenTarget, beside: Bool = false) {
-        guard let workspace = WorkspaceRegistry.shared.current else { return }
-        if beside {
-            workspace.openBeside(target)
+    /// Shows a notebook or PDF in the main window (or its own window, if it
+    /// has one), or opens it in a new window of its own.
+    private static func open(_ target: OpenTarget, inNewWindow: Bool = false) {
+        if inNewWindow {
+            AppNavigator.shared.openInNewWindow(target)
         } else {
-            workspace.open(target)
+            // She may be in a notebook's or PDF's own window: the main
+            // window comes forward to show it.
+            AppNavigator.shared.open(target, showingMainWindow: true)
         }
     }
 

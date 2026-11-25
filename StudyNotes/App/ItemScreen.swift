@@ -1,7 +1,8 @@
 import SwiftData
 import SwiftUI
 
-/// A notebook or PDF, on one side of a tab.
+/// A notebook or PDF: opened from the library in the main window (Back
+/// returns to the library), or in a window of its own (`ItemWindow`).
 struct ItemScreen: View {
     let target: OpenTarget
 
@@ -16,11 +17,9 @@ struct ItemScreen: View {
 }
 
 private struct NotebookItemContent: View {
-    let id: UUID
     @Query private var matches: [Notebook]
 
     init(id: UUID) {
-        self.id = id
         _matches = Query(filter: #Predicate<Notebook> { $0.id == id })
     }
 
@@ -28,17 +27,15 @@ private struct NotebookItemContent: View {
         if let notebook = matches.first {
             NotebookScreen(notebook: notebook)
         } else {
-            DeletedItemView(kind: "notebook", target: .notebook(id))
+            DeletedItemView(kind: "notebook")
         }
     }
 }
 
 private struct PDFItemContent: View {
-    let id: UUID
     @Query private var matches: [PDFItem]
 
     init(id: UUID) {
-        self.id = id
         _matches = Query(filter: #Predicate<PDFItem> { $0.id == id })
     }
 
@@ -46,22 +43,44 @@ private struct PDFItemContent: View {
         if let item = matches.first {
             PDFReaderScreen(item: item)
         } else {
-            DeletedItemView(kind: "PDF", target: .pdf(id))
+            DeletedItemView(kind: "PDF")
         }
     }
 }
 
-/// Shown when an open notebook or PDF was deleted (on another iPad, say).
+/// Shown when the open notebook or PDF was deleted.
 struct DeletedItemView: View {
     let kind: String
-    let target: OpenTarget
-    @Environment(\.workspace) private var workspace
+    @Environment(\.isInItemWindow) private var isInItemWindow
+    @Environment(\.dismissWindow) private var dismissWindow
 
     var body: some View {
         ContentUnavailableView {
             Label("This \(kind) was deleted", systemImage: "trash")
         } actions: {
-            Button("Close") { workspace?.remove(target) }
+            if isInItemWindow {
+                Button("Close Window") { dismissWindow() }
+            } else {
+                Button("Back to Library") { AppNavigator.shared.showLibrary() }
+            }
+        }
+    }
+}
+
+/// Goes straight back to the library, from a notebook's page. In a notebook's
+/// own window, it brings the main window forward instead.
+struct LibraryButton: View {
+    @Environment(\.isInItemWindow) private var isInItemWindow
+
+    var body: some View {
+        Button {
+            if isInItemWindow {
+                AppNavigator.shared.showMainWindow()
+            } else {
+                AppNavigator.shared.showLibrary()
+            }
+        } label: {
+            Label("Library", systemImage: "square.grid.2x2")
         }
     }
 }

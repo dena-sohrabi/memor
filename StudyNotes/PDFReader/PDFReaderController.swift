@@ -18,8 +18,7 @@ final class PDFReaderController: UIViewController {
     private let pdfView = StudyPDFView()
     private let thumbnailView = PDFThumbnailView()
     private var thumbnailWidth: NSLayoutConstraint?
-    /// The window's pen palette, shared with a notebook beside this PDF.
-    private let toolPicker: PKToolPicker
+    private let toolPicker = PKToolPicker()
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private lazy var highlightPan = UIPanGestureRecognizer(target: self, action: #selector(handleHighlightPan(_:)))
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
@@ -36,15 +35,6 @@ final class PDFReaderController: UIViewController {
     private let positionDebouncer = Debouncer()
     private var eraserReturn: EraserAutoReturn?
     private var undoTaps: UndoTapGestures?
-    /// A finger or the Pencil touched the PDF, so its side of the tab is
-    /// the one you're using.
-    var onTouched: (@MainActor () -> Void)?
-    /// This PDF is on the side of the tab you're using (always, with one
-    /// item on screen).
-    private(set) var isInActivePane = true
-    /// This PDF's own undo, so undoing on one side of a tab never undoes
-    /// something on the other side.
-    private let readerUndoManager = UndoManager()
     /// This open PDF, for the study pal.
     let palPageID = UUID()
     /// Circle something for the study pal.
@@ -69,12 +59,11 @@ final class PDFReaderController: UIViewController {
         editingEnded: { [weak self] in self?.restoreFocusSoon() }
     ))
 
-    init(document: PDFDocument, item: PDFItem, editor: PDFEditor, modelContext: ModelContext, toolPicker: PKToolPicker) {
+    init(document: PDFDocument, item: PDFItem, editor: PDFEditor, modelContext: ModelContext) {
         self.document = document
         self.item = item
         self.editor = editor
         self.modelContext = modelContext
-        self.toolPicker = toolPicker
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -82,35 +71,10 @@ final class PDFReaderController: UIViewController {
 
     override var canBecomeFirstResponder: Bool { true }
 
-    /// Highlights, ink and typed notes all find this one, up the responder
-    /// chain.
-    override var undoManager: UndoManager? { readerUndoManager }
-
-    /// Its side of the tab became, or stopped being, the one you're using.
-    /// Becoming it, the PDF takes focus, so the pen palette shows for it
-    /// with Ink, and hides while you read.
-    func setInActivePane(_ active: Bool) {
-        guard active != isInActivePane else { return }
-        isInActivePane = active
-        guard active, isViewLoaded, view.window != nil, textBoxes.editingBox == nil else { return }
-        becomeFirstResponder()
-    }
-
-    /// The PDF is closing. The pen palette belongs to the window and stays,
-    /// so this PDF stops following it.
-    func tearDown() {
-        eraserReturn?.stop()
-        for overlay in overlays.values {
-            toolPicker.removeObserver(overlay.canvasView)
-        }
-        toolPicker.setVisible(false, forFirstResponder: self)
-    }
-
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.addGestureRecognizer(TouchObserver { [weak self] in self?.onTouched?() })
         view.backgroundColor = .secondarySystemBackground
 
         // The overlay provider has to be set before the document.
@@ -306,8 +270,7 @@ final class PDFReaderController: UIViewController {
 
     private func restoreFocusSoon() {
         Task { [weak self] in
-            // Not when you went to the other side of the tab, which ended the typing.
-            guard let self, self.tool == .ink, self.isInActivePane, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
+            guard let self, self.tool == .ink, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
             self.becomeFirstResponder()
         }
     }

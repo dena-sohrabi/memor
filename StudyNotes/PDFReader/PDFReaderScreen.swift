@@ -1,5 +1,4 @@
 import PDFKit
-import PencilKit
 import SwiftData
 import SwiftUI
 import UIKit
@@ -56,16 +55,6 @@ final class PDFEditor {
     var pageCount = 0
     var showsPageSidebar = false
     @ObservationIgnored weak var controller: PDFReaderController?
-    @ObservationIgnored private var pickerStorage: PKToolPicker?
-
-    /// The pen palette, outside a window with tabs. In one, the window's
-    /// palette is used (see `Workspace.toolPicker`).
-    var toolPicker: PKToolPicker {
-        if let pickerStorage { return pickerStorage }
-        let picker = PKToolPicker()
-        pickerStorage = picker
-        return picker
-    }
 
     /// Circle something on a page for the study pal.
     func setCircling(_ on: Bool) {
@@ -86,8 +75,6 @@ struct PDFReaderScreen: View {
     @Bindable var item: PDFItem
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.workspace) private var workspace
-    @Environment(\.paneSide) private var paneSide
     @State private var editor = PDFEditor()
 
     @State private var document: PDFDocument?
@@ -114,8 +101,6 @@ struct PDFReaderScreen: View {
             .toolbar { toolbarContent }
             .task { await loadDocument() }
             .onChange(of: editor.tool) { _, tool in
-                // Picking a tool uses this side of the tab.
-                workspace?.activate(paneSide)
                 editor.controller?.apply(tool: tool)
             }
             .onChange(of: editor.showsPageSidebar) { _, shows in
@@ -153,16 +138,8 @@ struct PDFReaderScreen: View {
     @ViewBuilder
     private var content: some View {
         if let document {
-            PDFReaderRepresentable(
-                document: document,
-                item: item,
-                editor: editor,
-                modelContext: modelContext,
-                toolPicker: workspace?.toolPicker ?? editor.toolPicker,
-                isActivePane: workspace?.isActive(paneSide) ?? true,
-                onTouched: { [workspace, paneSide] in workspace?.activate(paneSide) }
-            )
-            .ignoresSafeArea(.container, edges: .bottom)
+            PDFReaderRepresentable(document: document, item: item, editor: editor, modelContext: modelContext)
+                .ignoresSafeArea(.container, edges: .bottom)
         } else if fileIsMissing {
             ContentUnavailableView(
                 "This PDF isn't on this iPad yet",
@@ -278,26 +255,12 @@ private struct PDFReaderRepresentable: UIViewControllerRepresentable {
     let item: PDFItem
     let editor: PDFEditor
     let modelContext: ModelContext
-    let toolPicker: PKToolPicker
-    /// This PDF is on the side of the tab you're using.
-    let isActivePane: Bool
-    /// A finger or the Pencil touched the PDF.
-    let onTouched: @MainActor () -> Void
 
     func makeUIViewController(context: Context) -> PDFReaderController {
-        let controller = PDFReaderController(document: document, item: item, editor: editor, modelContext: modelContext, toolPicker: toolPicker)
-        controller.setInActivePane(isActivePane)
-        controller.onTouched = onTouched
+        let controller = PDFReaderController(document: document, item: item, editor: editor, modelContext: modelContext)
         editor.controller = controller
         return controller
     }
 
-    func updateUIViewController(_ controller: PDFReaderController, context: Context) {
-        controller.onTouched = onTouched
-        controller.setInActivePane(isActivePane)
-    }
-
-    static func dismantleUIViewController(_ controller: PDFReaderController, coordinator: ()) {
-        controller.tearDown()
-    }
+    func updateUIViewController(_ controller: PDFReaderController, context: Context) {}
 }

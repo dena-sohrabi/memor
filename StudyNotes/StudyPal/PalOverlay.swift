@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// The study pal on top of Memor's window, over the library and the tabs.
-/// She stays put as you go between them.
+/// The study pal on top of Memor's window, over the library and whatever
+/// notebook or PDF is open on top of it. She stays put as you go between
+/// them.
 ///
 /// - The switch beside her picks Voice or Chat.
 /// - Voice: no words on screen, except what she's doing while she uses a
@@ -773,7 +774,7 @@ private struct PalBubble: View {
 }
 
 /// Finds the window a view is in.
-struct WindowReader: UIViewRepresentable {
+private struct WindowReader: UIViewRepresentable {
     let onWindow: (UIWindow) -> Void
 
     func makeUIView(context: Context) -> ReaderView {

@@ -9,8 +9,6 @@ import SwiftUI
 final class NotebookEditor {
     var isTextMode = false
     /// Shared by every page, so the chosen pen stays when you switch pages.
-    /// In a window with tabs, the window's palette is used instead (see
-    /// `Workspace.toolPicker`).
     let toolPicker = PKToolPicker()
     @ObservationIgnored weak var controller: NotebookCanvasController?
 
@@ -62,15 +60,12 @@ final class NotebookEditor {
     func leaveCurrentPage() { controller?.prepareToLeave() }
 }
 
-/// One notebook page, filling its side of the tab. The back button returns
-/// to the grid of pages. New Page adds a page right after this one and
-/// switches to it.
+/// One notebook page, full screen. The back button returns to the grid of
+/// pages. New Page adds a page right after this one and switches to it.
 struct NotebookPageScreen: View {
     let notebook: Notebook
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.workspace) private var workspace
-    @Environment(\.paneSide) private var paneSide
     @State private var editor = NotebookEditor()
     @State private var pageID: UUID
     @State private var photoItem: PhotosPickerItem?
@@ -87,15 +82,8 @@ struct NotebookPageScreen: View {
         let index = pages.firstIndex { $0.id == pageID }
         Group {
             if let index {
-                NotebookCanvasRepresentable(
-                    page: pages[index],
-                    editor: editor,
-                    modelContext: modelContext,
-                    toolPicker: workspace?.toolPicker ?? editor.toolPicker,
-                    isActivePane: workspace?.isActive(paneSide) ?? true,
-                    onTouched: { [workspace, paneSide] in workspace?.activate(paneSide) }
-                )
-                .id(pages[index].id)
+                NotebookCanvasRepresentable(page: pages[index], editor: editor, modelContext: modelContext)
+                    .id(pages[index].id)
             } else {
                 Color(uiColor: Paper.color)
             }
@@ -119,6 +107,9 @@ struct NotebookPageScreen: View {
         .statusBarHidden(editor.hidesChrome)
         .persistentSystemOverlays(editor.hidesChrome ? .hidden : .automatic)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                LibraryButton()
+            }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { addPage(after: index.map { pages[$0] }) } label: {
                     Label("New page", systemImage: "doc.badge.plus")
@@ -147,11 +138,6 @@ struct NotebookPageScreen: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { editor.saveNow() }
         }
-        // With its toolbars hidden, the tab bar hides too (when the other
-        // side of the tab hid them as well).
-        .onChange(of: editor.hidesChrome) { _, hidden in
-            workspace?.setChromeHidden(hidden, on: paneSide)
-        }
         // The study pal went to another page of this notebook.
         .onChange(of: PalNavigator.shared.request) { _, request in
             guard let request, request.itemID == notebook.id, let target = request.pageID,
@@ -171,10 +157,7 @@ struct NotebookPageScreen: View {
                 photoItem = nil
             }
         }
-        .onDisappear {
-            editor.saveNow()
-            if editor.hidesChrome { workspace?.setChromeHidden(false, on: paneSide) }
-        }
+        .onDisappear { editor.saveNow() }
     }
 
     private func addPage(after page: NotebookPage?) {
@@ -192,21 +175,14 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
     let page: NotebookPage
     let editor: NotebookEditor
     let modelContext: ModelContext
-    let toolPicker: PKToolPicker
-    /// This page is on the side of the tab you're using.
-    let isActivePane: Bool
-    /// A finger or the Pencil touched the page.
-    let onTouched: @MainActor () -> Void
 
     func makeUIViewController(context: Context) -> NotebookCanvasController {
         let controller = NotebookCanvasController(
             page: page,
             modelContext: modelContext,
-            toolPicker: toolPicker,
+            toolPicker: editor.toolPicker,
             isTextMode: editor.isTextMode
         )
-        controller.setInActivePane(isActivePane)
-        controller.onTouched = onTouched
         controller.onTextModeEnded = { [weak editor] in editor?.isTextMode = false }
         controller.showsToolPicker = !editor.hidesChrome
         controller.onToggleChrome = { [weak editor] in
@@ -218,10 +194,7 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
         return controller
     }
 
-    func updateUIViewController(_ controller: NotebookCanvasController, context: Context) {
-        controller.onTouched = onTouched
-        controller.setInActivePane(isActivePane)
-    }
+    func updateUIViewController(_ controller: NotebookCanvasController, context: Context) {}
 
     static func dismantleUIViewController(_ controller: NotebookCanvasController, coordinator: ()) {
         controller.tearDown()
