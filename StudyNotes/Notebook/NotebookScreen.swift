@@ -2,10 +2,12 @@ import SwiftData
 import SwiftUI
 
 /// The first screen of a notebook: its pages in a grid, like the library.
-/// Tapping a page opens it in `NotebookPageScreen`; Back goes to the library.
+/// Tapping a page opens it in `NotebookPageScreen`; Back comes back here.
 struct NotebookScreen: View {
     @Bindable var notebook: Notebook
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.workspace) private var workspace
+    @Environment(\.paneSide) private var paneSide
     @State private var openedPage: NotebookPage?
     @State private var renamingPage: NotebookPage?
     @State private var pageTitle = ""
@@ -112,6 +114,8 @@ struct NotebookScreen: View {
     private func open(_ page: NotebookPage) {
         notebook.currentPageID = page.id
         openedPage = page
+        // Opening a page uses this side of the tab.
+        workspace?.activate(paneSide)
     }
 
     /// Opens the page the study pal asked for, from the grid. (When a page

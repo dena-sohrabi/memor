@@ -16,10 +16,12 @@ struct StudyNotesApp: App {
     }
 
     var body: some Scene {
-        // One window: the library, with notebooks and PDFs opening on top
-        // of it (see `AppNavigator`).
-        WindowGroup {
-            LibraryView()
+        // Each window has its own tabs (see `Workspace`). Windows open only
+        // when you ask: Open in New Window, or the system's New Window.
+        WindowGroup(for: MemorWindow.self) { $window in
+            WorkspaceView(window: window)
+        } defaultValue: {
+            MemorWindow()
         }
         .modelContainer(container)
     }

@@ -92,6 +92,15 @@ final class NotebookCanvasController: UIViewController {
     var onToolPickerFrame: ((CGRect) -> Void)?
     /// Whether the pen palette shows. Off while the toolbars are hidden.
     var showsToolPicker = true
+    /// A finger or the Pencil touched the page, so its side of the tab is
+    /// the one you're using.
+    var onTouched: (@MainActor () -> Void)?
+    /// This page is on the side of the tab you're using (always, with one
+    /// item on screen). Only that side takes the keyboard and the pen palette.
+    private(set) var isInActivePane = true
+    /// This page's own undo, so undoing on one side of a tab never undoes
+    /// something on the other side.
+    private let pageUndoManager = UndoManager()
     /// This open page, for the study pal.
     let palPageID = UUID()
     /// Circle something for the study pal.
@@ -131,8 +140,8 @@ final class NotebookCanvasController: UIViewController {
     private var isTextMode: Bool
     /// Set once another page is replacing this one.
     private var isLeaving = false
-    /// The window's undo manager, kept so this page's undo steps can be
-    /// cleared after the canvas has left the window.
+    /// The canvas's undo manager (this page's own), kept so its undo steps
+    /// can be cleared after the canvas has left the window.
     private weak var windowUndoManager: UndoManager?
     private lazy var textTap = UITapGestureRecognizer(target: self, action: #selector(handleTextTap(_:)))
     /// A finger tap anywhere else deselects the selected text box.
@@ -181,10 +190,25 @@ final class NotebookCanvasController: UIViewController {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
+    /// The canvas, its text boxes and pictures all find this one, up the
+    /// responder chain.
+    override var undoManager: UndoManager? { pageUndoManager }
+
+    /// Its side of the tab became, or stopped being, the one you're using.
+    /// Becoming it, the canvas takes focus back, so the pen palette is for
+    /// this page.
+    func setInActivePane(_ active: Bool) {
+        guard active != isInActivePane else { return }
+        isInActivePane = active
+        guard active, isViewLoaded, view.window != nil, !isLeaving, textBoxes.editingBox == nil else { return }
+        canvasView.becomeFirstResponder()
+    }
+
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        view.addGestureRecognizer(TouchObserver { [weak self] in self?.onTouched?() })
         // Paper stays light in dark mode, so ink colors and text match the thumbnails.
         view.overrideUserInterfaceStyle = .light
         view.backgroundColor = Paper.color
@@ -309,7 +333,9 @@ final class NotebookCanvasController: UIViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        canvasView.becomeFirstResponder()
+        // With two side by side, the side you aren't using leaves focus
+        // (and the pen palette) to the other.
+        if isInActivePane { canvasView.becomeFirstResponder() }
         windowUndoManager = canvasView.undoManager
         if !isLeaving { PalWorkspace.shared.register(self) }
     }
@@ -667,7 +693,8 @@ final class NotebookCanvasController: UIViewController {
     private func restoreCanvasFocusSoon() {
         // Wait a turn: if another box is taking focus, leave it alone.
         Task { [weak self] in
-            guard let self, !self.isLeaving, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
+            // Nor when you went to the other side of the tab, which ended the typing.
+            guard let self, !self.isLeaving, self.isInActivePane, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
             self.canvasView.becomeFirstResponder()
         }
     }

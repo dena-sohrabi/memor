@@ -1,8 +1,7 @@
 import SwiftData
 import SwiftUI
 
-/// A notebook or PDF, opened from the library in the same window. Back
-/// returns to the library.
+/// A notebook or PDF, on one side of a tab.
 struct ItemScreen: View {
     let target: OpenTarget
 
@@ -17,9 +16,11 @@ struct ItemScreen: View {
 }
 
 private struct NotebookItemContent: View {
+    let id: UUID
     @Query private var matches: [Notebook]
 
     init(id: UUID) {
+        self.id = id
         _matches = Query(filter: #Predicate<Notebook> { $0.id == id })
     }
 
@@ -27,15 +28,17 @@ private struct NotebookItemContent: View {
         if let notebook = matches.first {
             NotebookScreen(notebook: notebook)
         } else {
-            DeletedItemView(kind: "notebook")
+            DeletedItemView(kind: "notebook", target: .notebook(id))
         }
     }
 }
 
 private struct PDFItemContent: View {
+    let id: UUID
     @Query private var matches: [PDFItem]
 
     init(id: UUID) {
+        self.id = id
         _matches = Query(filter: #Predicate<PDFItem> { $0.id == id })
     }
 
@@ -43,31 +46,22 @@ private struct PDFItemContent: View {
         if let item = matches.first {
             PDFReaderScreen(item: item)
         } else {
-            DeletedItemView(kind: "PDF")
+            DeletedItemView(kind: "PDF", target: .pdf(id))
         }
     }
 }
 
-/// Shown when the open notebook or PDF was deleted.
+/// Shown when an open notebook or PDF was deleted (on another iPad, say).
 struct DeletedItemView: View {
     let kind: String
+    let target: OpenTarget
+    @Environment(\.workspace) private var workspace
 
     var body: some View {
         ContentUnavailableView {
             Label("This \(kind) was deleted", systemImage: "trash")
         } actions: {
-            Button("Back to Library") { AppNavigator.shared.showLibrary() }
-        }
-    }
-}
-
-/// Goes straight back to the library, from a notebook's page.
-struct LibraryButton: View {
-    var body: some View {
-        Button {
-            AppNavigator.shared.showLibrary()
-        } label: {
-            Label("Library", systemImage: "square.grid.2x2")
+            Button("Close") { workspace?.remove(target) }
         }
     }
 }

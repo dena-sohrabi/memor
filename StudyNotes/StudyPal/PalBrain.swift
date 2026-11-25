@@ -305,7 +305,7 @@ final class PalBrain {
         } else {
             if focused == nil { overview.append("They're in the library or a notebook's page grid right now.") }
             for page in pages {
-                let role = page === focused ? "on their screen" : "also open"
+                let role = page === focused ? "the one they're using" : "also on screen"
                 let kind = page.palKind == .notebook ? "notebook" : "PDF"
                 overview.append("- \(workspace.shortID(of: page)), \(role): \(kind) “\(page.palItemTitle)” (item_id \(page.palItemID.uuidString)), \(page.palWhere).")
                 talk.items[page.palItemID] = page.palItemTitle
