@@ -1,6 +1,5 @@
 import AVFAudio
 import Foundation
-import Speech
 import UIKit
 
 /// Turns what you say to the study pal into text, for voice messages, with
@@ -9,7 +8,7 @@ import UIKit
 /// so the terms you're studying come out right, and the text is ready the
 /// moment you're done.
 ///
-/// Tap the mic (or her) and speak, then tap again to send (`start()`, then
+/// Tap her (or the mic in her card) and speak, then tap again to send (`start()`, then
 /// `release()`), like dictation in ChatGPT or Claude. A pause never sends
 /// it, so you can stop and think. Only if you say nothing at all for a
 /// while does she stop listening. Whether you said anything is told from
@@ -154,8 +153,6 @@ final class StudyPalListener {
                     audioSeconds += Double(data.count) / Double(PalTranscriber.bytesPerSecond)
                 case .level(let level):
                     hear(level)
-                case .text, .failed:
-                    break
                 }
             }
             guard self.generation == generation, isEnding else { return }
@@ -516,39 +513,21 @@ enum SpeechVocabulary {
     ]
 }
 
-/// What the microphone (and, listening for her name, the recognizer)
-/// reports.
+/// What the microphone reports.
 enum SpeechEvent: Sendable {
-    case text(String, isFinal: Bool)
     /// How loud you are, 0 to 1.
     case level(Float)
     /// The sound itself, as 16-bit mono PCM at 24 kHz, for the transcriber.
     case audio(Data)
-    case failed
 }
 
-/// The microphone, and for her name the on-device recognizer. Not on the
-/// main actor: audio arrives on the audio thread and results on the
-/// recognizer's queue, and the closures that handle them are made here, so
-/// they belong to neither. They only pass events along a stream.
+/// The microphone. Not on the main actor: audio arrives on the audio
+/// thread, and the closure that handles it is made here, so it doesn't
+/// belong to the main actor. It only passes events along a stream.
 final class SpeechCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
-    private var request: SFSpeechAudioBufferRecognitionRequest?
-    private var task: SFSpeechRecognitionTask?
 
-    private enum Failure: Error { case unavailable, noMicrophone }
-
-    /// Her name is listened for in English: your own kind of English if
-    /// your iPad is set to it, otherwise American English.
-    static var locale: Locale {
-        Locale.current.language.languageCode == .english ? Locale.current : Locale(identifier: "en-US")
-    }
-
-    /// Holds the request for the audio thread.
-    private final class RequestBox: @unchecked Sendable {
-        let request: SFSpeechAudioBufferRecognitionRequest
-        init(_ request: SFSpeechAudioBufferRecognitionRequest) { self.request = request }
-    }
+    private enum Failure: Error { case noMicrophone }
 
     /// Asks for the microphone, for voice messages. Returns why it can't
     /// be used, or nil.
@@ -559,100 +538,42 @@ final class SpeechCapture: @unchecked Sendable {
         return nil
     }
 
-    /// Asks for speech recognition and the microphone, and checks that
-    /// her name can be listened for on this iPad. Returns why it can't, or
-    /// nil.
-    static func prepare() async -> String? {
-        let speech = await withCheckedContinuation { (continuation: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
-            SFSpeechRecognizer.requestAuthorization { status in continuation.resume(returning: status) }
-        }
-        guard speech == .authorized else {
-            return "Speech recognition is off for Memor, so I can't listen for my name. Turn it on in Settings › Privacy & Security › Speech Recognition."
-        }
-        if let problem = await prepareMicrophone() { return problem }
-        guard let recognizer = SFSpeechRecognizer(locale: locale), recognizer.isAvailable else {
-            return "Listening for my name isn't available right now."
-        }
-        // Listening for her name happens all the time, so it stays on the iPad.
-        guard recognizer.supportsOnDeviceRecognition else {
-            return "This iPad can't listen for my name on its own yet. Add English under Settings › General › Keyboard › Dictation Languages."
-        }
-        return nil
-    }
-
     /// Where what's heard goes; finished when it stops.
     private var events: AsyncStream<SpeechEvent>.Continuation?
 
     /// Starts the microphone, sending how loud it is and the audio itself
-    /// to `events`. `recognizes`: also recognizes speech on the iPad (to
-    /// hear her name), expecting `hints`. `quietly`: for waiting to hear her
-    /// name, so other audio keeps playing at full volume.
-    func start(events: AsyncStream<SpeechEvent>.Continuation, hints: [String] = [], quietly: Bool = false, recognizes: Bool = false) throws {
+    /// to `events`.
+    func start(events: AsyncStream<SpeechEvent>.Continuation) throws {
         self.events = events
         let session = AVAudioSession.sharedInstance()
         // The same setup she speaks with, so switching between listening
         // and talking doesn't glitch.
-        try session.setCategory(.playAndRecord, mode: .default, options: quietly ? [.mixWithOthers, .defaultToSpeaker] : [.duckOthers, .defaultToSpeaker])
+        try session.setCategory(.playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
-
-        var recognizer: SFSpeechRecognizer?
-        let box: RequestBox?
-        if recognizes {
-            guard let found = SFSpeechRecognizer(locale: Self.locale) else { throw Failure.unavailable }
-            let request = SFSpeechAudioBufferRecognitionRequest()
-            request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = true
-            request.addsPunctuation = true
-            request.taskHint = .dictation
-            if !hints.isEmpty { request.contextualStrings = hints }
-            self.request = request
-            recognizer = found
-            box = RequestBox(request)
-        } else {
-            box = nil
-        }
 
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { throw Failure.noMicrophone }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            box?.request.append(buffer)
             events.yield(.level(SpeechCapture.level(of: buffer)))
             let audio = SpeechCapture.pcm16(buffer)
             if !audio.isEmpty { events.yield(.audio(audio)) }
         }
         engine.prepare()
         try engine.start()
-
-        if let recognizer, let request = self.request {
-            task = recognizer.recognitionTask(with: request) { result, error in
-                if let result {
-                    events.yield(.text(result.bestTranscription.formattedString, isFinal: result.isFinal))
-                } else if error != nil {
-                    events.yield(.failed)
-                }
-            }
-        }
     }
 
-    /// Stops listening. `releasingAudio`: lets the audio session go too
-    /// (not when she's about to talk, or her voice would be cut).
-    func stop(releasingAudio: Bool = true) {
+    /// Stops listening, and lets the audio session go.
+    func stop() {
         if engine.isRunning { engine.stop() }
         engine.inputNode.removeTap(onBus: 0)
-        request?.endAudio()
-        task?.cancel()
-        request = nil
-        task = nil
         events?.finish()
         events = nil
-        if releasingAudio {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     /// How loud a buffer is, 0 (quiet) to 1 (loud).
-    private static func level(of buffer: AVAudioPCMBuffer) -> Float {
+    static func level(of buffer: AVAudioPCMBuffer) -> Float {
         guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return 0 }
         let count = Int(buffer.frameLength)
         var sum: Float = 0
@@ -665,7 +586,7 @@ final class SpeechCapture: @unchecked Sendable {
     /// A buffer as 16-bit little-endian mono PCM at 24 kHz: its channels
     /// mixed, and each output sample the average of the input samples it
     /// stands for.
-    private static func pcm16(_ buffer: AVAudioPCMBuffer) -> Data {
+    static func pcm16(_ buffer: AVAudioPCMBuffer) -> Data {
         guard let channels = buffer.floatChannelData else { return Data() }
         let frames = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)

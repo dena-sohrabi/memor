@@ -20,7 +20,6 @@ struct SettingsView: View {
     @AppStorage(StudyPalCharacter.nameKey) private var palName = ""
     @AppStorage(PalMemoryStore.isOnKey) private var remembers = true
     @AppStorage(PalBrainModel.settingKey) private var brainModel = ""
-    @AppStorage(PalWakeListener.isEnabledKey) private var wakeWord = true
     @AppStorage(NotebookLayout.settingKey) private var notebookLayout: NotebookLayout = .infinite
     @State private var hasClaudeKey = APIKeyStore.hasKey
     @State private var hasOpenAIKey = OpenAIKeyStore.hasKey
@@ -102,10 +101,6 @@ struct SettingsView: View {
                     SettingsRow("Memory", systemImage: "book.closed.fill", color: .indigo,
                                 value: remembers ? "On" : "Off")
                 }
-                Toggle(isOn: $wakeWord) {
-                    SettingsLabel("Listen for “Hey \(palName.isEmpty ? "Study Pal" : palName)”", systemImage: "ear.fill", color: .mint)
-                }
-                .onChange(of: wakeWord) { Pal.shared.wake.retry() }
                 Toggle(isOn: $palSpeaks) {
                     SettingsLabel("Read Replies Aloud", systemImage: "waveform", color: .green)
                 }
@@ -117,11 +112,17 @@ struct SettingsView: View {
                                 value: palVoice.capitalized)
                 }
                 .disabled(!hasOpenAIKey)
+                NavigationLink {
+                    LiveCallsPage()
+                } label: {
+                    SettingsRow("Live Calls", systemImage: "phone.fill", color: .teal,
+                                value: Pal.shared.hasLiveCalls ? "On" : "Off")
+                }
                 Toggle(isOn: $palSounds) {
                     SettingsLabel("Sounds", systemImage: "speaker.wave.2.fill", color: .pink)
                 }
             } footer: {
-                Text("Say “Hey \(palName.isEmpty ? "Study Pal" : palName)” and what you want, and she answers when you pause; she listens for her name on this iPad only (the microphone dot shows while she does), and never while she's talking or hidden. Or use the mic beside her: hold it while you talk and let go, or tap it, talk and tap again. The switch beside her picks Voice (she talks back and listens for her name) or Chat (she only writes).")
+                Text("In Voice mode, tap her to talk: with Live Calls on, that calls her (just talk, and tap her again to hang up); otherwise, talk and tap again to send a voice message. Hold her and let go to switch between Voice (she talks with you) and Chat (she only writes).")
             }
 
             Section {
@@ -278,7 +279,7 @@ enum APIKeyKind {
         case .claude:
             "When Claude is her mind, your messages go to Anthropic: as text (what you say out loud is turned into text by OpenAI first), with pictures of the pages on your screen, their text, what you circled or selected, and what she remembers about you and those notes. Claude's small model writes down what she should remember."
         case .openAI:
-            "Her ears, her voice and the pictures she draws come from OpenAI: what you say to her goes to OpenAI to be turned into text, with the words on your open pages so it's heard right; what she says goes to OpenAI to be spoken; and what she wants drawn, to be drawn. Listening for “Hey” and her name stays on your iPad. When GPT is her mind, your messages go to OpenAI the same way they'd go to Anthropic for Claude. Nothing is stored on OpenAI's side for the conversation."
+            "Her ears, her voice and the pictures she draws come from OpenAI: what you say to her goes to OpenAI to be turned into text, with the words on your open pages so it's heard right; what she says goes to OpenAI to be spoken; and what she wants drawn, to be drawn. When GPT is her mind, your messages go to OpenAI the same way they'd go to Anthropic for Claude. Nothing is stored on OpenAI's side for the conversation."
         }
     }
 
@@ -487,13 +488,16 @@ private struct PrivacyPage: View {
     var body: some View {
         Form {
             Section("Stays on Your iPad") {
-                Text("Your API keys, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her reminders, which are notifications on this iPad. The AI usage log in Settings → AI Usage: which model each request went to, its token counts and its cost, never what was said.")
+                Text("Your API keys, in the Keychain. Her reminders, which are notifications on this iPad. The AI usage log in Settings → AI Usage: which model each request went to, its token counts and its cost, never what was said.")
             }
             Section("Kept in Your iCloud") {
                 Text("Your notebooks, pages, PDFs, handwriting, typed notes and chats with her. Her memory, which you can read and delete in Settings → Memory, her name and your settings. They're saved to your own iCloud, never to a Memor server, so they're on all your iPads and come back if you reinstall Memor.")
             }
             Section("Sent to Her Mind (Anthropic or OpenAI), When You Message Her") {
                 Text("Your message as text, pictures of the pages on your screen and their text, what you circled or selected, what she remembers about you and those notes, and what she finds when she searches your notes for you. When a talk pauses, the same company's small model writes down what she should remember from it.")
+            }
+            Section("Sent Through Your Live Server, in a Call") {
+                Text("While a live call is on, your voice goes through your own Memor Live server, which passes it on without keeping it, to OpenAI's GPT-Live, with the words on your open pages so they're heard right. What you ask goes on to her mind as above, and her answers go back to GPT-Live to be spoken. Your OpenAI key for calls is on that server, not on this iPad.")
             }
             Section("Sent to OpenAI for Her Voice and Pictures") {
                 Text("What she says, to be spoken in her voice, and descriptions of the pictures she draws.")

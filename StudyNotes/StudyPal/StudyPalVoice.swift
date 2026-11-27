@@ -120,7 +120,9 @@ final class StudyPalVoice {
     }
 
     private func play(_ buffer: AVAudioPCMBuffer, volume: Float) {
-        guard isEnabled, start() else { return }
+        // Quiet during a call: the call's microphone would hear her sounds
+        // as you talking (its echo cancellation only knows her voice).
+        guard isEnabled, !Pal.shared.call.isOn, start() else { return }
         idleTask?.cancel()
         let player = players[nextPlayer]
         nextPlayer = (nextPlayer + 1) % players.count

@@ -18,7 +18,6 @@ enum CloudSettings {
         StudyPalSpeaker.voiceKey,
         StudyPalSpeaker.isEnabledKey,
         StudyPalVoice.isEnabledKey,
-        PalWakeListener.isEnabledKey,
         PalMemoryStore.isOnKey,
         NotebookLayout.settingKey,
     ]

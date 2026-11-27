@@ -1,0 +1,11 @@
+name = "memor-live-relay"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Calls longer than this are ended, so a forgotten call can't run up a bill.
+MAX_CALL_MINUTES = "20"
+
+# Secrets, set once with:
+#   npx wrangler secret put OPENAI_API_KEY
+#   npx wrangler secret put MEMOR_LIVE_TOKEN

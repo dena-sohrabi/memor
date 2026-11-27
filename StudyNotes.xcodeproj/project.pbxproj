@@ -285,8 +285,7 @@
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Memor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Your study pal listens when you tap her or the mic, or say “Hey” and her name, so you can talk to her. What you say to her is sent to OpenAI to be turned into text.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Your study pal listens for “Hey” and her name on your iPad, so you can call her without touching anything.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Your study pal listens when you tap her or the mic, so you can talk to her. What you say to her is sent to OpenAI to be turned into text.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -323,8 +322,7 @@
 				INFOPLIST_FILE = Config/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Memor;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.education";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Your study pal listens when you tap her or the mic, or say “Hey” and her name, so you can talk to her. What you say to her is sent to OpenAI to be turned into text.";
-				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Your study pal listens for “Hey” and her name on your iPad, so you can call her without touching anything.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Your study pal listens when you tap her or the mic, so you can talk to her. What you say to her is sent to OpenAI to be turned into text.";
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

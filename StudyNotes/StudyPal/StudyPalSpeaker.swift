@@ -441,7 +441,7 @@ final class StudyPalSpeaker {
 
 /// Counts audio buffers still to be played. The player reports each one
 /// done on its own thread, so the count is behind a lock.
-private final class PendingBuffers: @unchecked Sendable {
+final class PendingBuffers: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
 

@@ -9,6 +9,7 @@ extension AIPurpose {
         case .voice: .green
         case .ears: .mint
         case .drawing: .pink
+        case .calls: .teal
         }
     }
 }
@@ -224,6 +225,9 @@ struct UsagePage: View {
             return "\(bucket.requests.formatted()) times · \(AIUsageFormat.seconds(bucket.seconds)) of talking"
         case .drawing:
             return bucket.requests == 1 ? "1 picture" : "\(bucket.requests.formatted()) pictures"
+        case .calls:
+            let calls = bucket.requests == 1 ? "1 call" : "\(bucket.requests.formatted()) calls"
+            return "\(calls) · \(AIUsageFormat.seconds(bucket.seconds))"
         }
     }
 }
@@ -289,7 +293,7 @@ struct UsageRequestsPage: View {
     }
 
     private func used(by record: AIUsageRecord) -> String {
-        if record.purpose == .ears { return AIUsageFormat.seconds(record.seconds) }
+        if record.purpose == .ears || record.purpose == .calls { return AIUsageFormat.seconds(record.seconds) }
         var parts: [String] = []
         let tokensIn = record.tokensIn
         let cached = record.cachedInput + record.audioCachedInput

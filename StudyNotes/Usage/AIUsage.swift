@@ -16,6 +16,8 @@ enum AIPurpose: String, Codable, CaseIterable, Identifiable, Sendable {
     case ears
     /// The pictures she draws.
     case drawing
+    /// Live calls with her (GPT-Live), by the minute.
+    case calls
 
     var id: String { rawValue }
 
@@ -26,6 +28,7 @@ enum AIPurpose: String, Codable, CaseIterable, Identifiable, Sendable {
         case .voice: "Voice"
         case .ears: "Listening"
         case .drawing: "Pictures"
+        case .calls: "Calls"
         }
     }
 
@@ -36,6 +39,7 @@ enum AIPurpose: String, Codable, CaseIterable, Identifiable, Sendable {
         case .voice: "waveform"
         case .ears: "ear.fill"
         case .drawing: "paintbrush.pointed.fill"
+        case .calls: "phone.fill"
         }
     }
 }
@@ -120,6 +124,10 @@ enum AIPricing {
     /// Her ears (gpt-live-transcribe), per minute of audio.
     static let transcriptionPerMinute = 0.017
 
+    /// Live calls (gpt-live-1.1), per minute the call is open, billed by
+    /// the second.
+    static let callPerMinute = 0.05
+
     /// Her pictures (gpt-image-2.6-flare).
     enum Image {
         static let textInput = 5.0, textCachedInput = 1.25
@@ -154,6 +162,10 @@ enum AIPricing {
 
     static func transcriptionCost(seconds: Double) -> Double {
         seconds / 60 * transcriptionPerMinute
+    }
+
+    static func callCost(seconds: Double) -> Double {
+        seconds / 60 * callPerMinute
     }
 
     static func imageCost(textInput: Int, imageInput: Int, imageOutput: Int) -> Double {
@@ -559,6 +571,15 @@ enum OpenAIUsage {
         AIUsageStore.shared.add(record)
     }
 
+    /// A live call's length, logged.
+    @MainActor
+    static func recordCall(seconds: Double, model: String) {
+        var record = AIUsageRecord(purpose: .calls, model: model)
+        record.seconds = seconds
+        record.cost = AIPricing.callCost(seconds: seconds)
+        AIUsageStore.shared.add(record)
+    }
+
     /// An Images API `usage` object, logged.
     @MainActor
     static func recordImage(_ usage: [String: Any]?, model: String) {
@@ -605,6 +626,7 @@ enum AIUsageFormat {
         case OpenAIClient.choresModel: return "GPT-6 Luna"
         case OpenAIClient.voiceModel: return "GPT Realtime 2.1 Mini"
         case OpenAIClient.transcriptionModel: return "GPT Live Transcribe"
+        case PalCall.model: return "GPT-Live 1.1"
         case OpenAIClient.imageModel: return "GPT Image 2.6 Flare"
         default: return id
         }

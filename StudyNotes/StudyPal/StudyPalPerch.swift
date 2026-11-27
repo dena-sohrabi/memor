@@ -7,7 +7,8 @@ import UIKit
 ///   each rub in the pencil, a soft purr under your hand (the iPad's screen
 ///   itself can't vibrate). Keep at it and hearts float up from her;
 /// - press and hold, or drag her straight off, to carry her somewhere
-///   else. She lifts a little while carried and swings as you move her.
+///   else. She lifts a little while carried and swings as you move her;
+/// - press and hold and let go without moving: her menu (`onHold`).
 ///
 /// The parent decides where she sits. It also places the coordinate space
 /// named `space` over the whole area she moves in.
@@ -19,8 +20,14 @@ struct StudyPalPerch: View {
     let mood: StudyPalMood
     let cue: StudyPalCue
     let onTap: () -> Void
+    /// You held her and let go where you picked her up.
+    let onHold: () -> Void
     /// You let go of her here, moving this fast (points a second).
     let onDrop: (_ point: CGPoint, _ velocity: CGSize) -> Void
+    /// What VoiceOver calls her.
+    var accessibilityName = "Study Pal"
+    /// What tapping her does, for VoiceOver.
+    var accessibilityHint = ""
 
     private enum Touch {
         case none
@@ -46,6 +53,13 @@ struct StudyPalPerch: View {
     @State private var lastHeart = Date.distantPast
     /// Taps in Apple Pencil Pro as you rub her with it.
     @State private var pencilFeedback: UICanvasFeedbackGenerator?
+
+    /// When your finger went down on her.
+    @State private var pressedAt = Date.distantPast
+
+    /// Held this long (seconds) and let go in place, she shows her menu,
+    /// like a long press anywhere in iPadOS.
+    private static let menuHold = 0.5
 
     private var isLifted: Bool { touch == .carrying }
 
@@ -77,13 +91,21 @@ struct StudyPalPerch: View {
             }
             .allowsHitTesting(false)
         }
+        // One button for VoiceOver, her size (before she's positioned, so
+        // it doesn't cover the window): activating it is a tap, and her
+        // menu is an action, since holding her isn't something VoiceOver does.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityName)
+        .accessibilityHint(accessibilityHint)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onTap() }
+        .accessibilityAction(named: "Voice or Chat") { onHold() }
         .animation(.spring(response: 0.35, dampingFraction: 0.65), value: isLifted)
         .position(x: center.x + carryOffset.width, y: center.y + carryOffset.height)
         .onChange(of: isTouching) { _, touching in
             // The system took the touch away without ending it.
             if !touching { finish(nil) }
         }
-        .accessibilityHidden(true)
     }
 
     /// Measured in the parent's space, not hers: she moves under the finger,
@@ -101,6 +123,7 @@ struct StudyPalPerch: View {
         switch touch {
         case .none:
             touch = .pressing
+            pressedAt = .now
             rub = Rub(at: value.startLocation)
             holdTask?.cancel()
             holdTask = Task {
@@ -189,6 +212,17 @@ struct StudyPalPerch: View {
             link.view?.endScratch()
         case .carrying:
             link.view?.setCarried(false)
+            if let value, hypot(value.translation.width, value.translation.height) <= 12 {
+                // Let go where she was picked up: held a while, her menu;
+                // only a moment (a slow tap), a tap.
+                withAnimation(.spring(duration: 0.4, bounce: 0.2)) { carryOffset = .zero }
+                if Date.now.timeIntervalSince(pressedAt) >= Self.menuHold {
+                    onHold()
+                } else {
+                    onTap()
+                }
+                break
+            }
             let point = CGPoint(x: center.x + carryOffset.width, y: center.y + carryOffset.height)
             withAnimation(.spring(duration: 0.6, bounce: 0.2)) {
                 onDrop(point, value?.velocity ?? .zero)
