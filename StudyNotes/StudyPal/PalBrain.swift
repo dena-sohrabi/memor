@@ -1,21 +1,31 @@
 import UIKit
 
-/// Which model is the study pal's mind. Chosen in Settings; a talk keeps
-/// the mind it started with.
+/// Which company's API is the study pal's mind: Anthropic (Claude) or
+/// OpenAI (GPT). Follows the model picked in Settings (`PalBrainModel`); a
+/// talk keeps the mind it started with.
 enum PalMind: String, CaseIterable, Identifiable {
-    /// Claude Opus 5.5, with your Anthropic key.
+    /// A Claude model, with your Anthropic key.
     case claude
-    /// GPT-6.2 Sol, with your OpenAI key.
+    /// A GPT model, with your OpenAI key.
     case openAI = "openai"
 
+    /// Before the model picker, Settings picked only the company. Still
+    /// read, so that choice carries over.
     nonisolated static let settingKey = "studyPal.mind"
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .claude: "Claude Opus 5.5"
-        case .openAI: "GPT-6.2 Sol"
+        case .claude: "Claude"
+        case .openAI: "GPT"
+        }
+    }
+
+    var company: String {
+        switch self {
+        case .claude: "Anthropic"
+        case .openAI: "OpenAI"
         }
     }
 
@@ -26,18 +36,81 @@ enum PalMind: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The mind chosen in Settings (Claude unless changed), or the other
-    /// one when only its key is there. Nil without any key.
-    static var current: PalMind? {
-        let chosen = PalMind(rawValue: UserDefaults.standard.string(forKey: settingKey) ?? "") ?? .claude
-        if chosen.hasKey { return chosen }
-        let other: PalMind = chosen == .claude ? .openAI : .claude
-        return other.hasKey ? other : nil
+    /// The company of the model she'd use now. Nil without any key.
+    static var current: PalMind? { PalBrainModel.current?.mind }
+}
+
+/// A model that can be the study pal's mind, picked in Settings. A talk
+/// keeps the model it started with; a new one takes the new pick.
+struct PalBrainModel: Identifiable, Hashable, Sendable {
+    /// The model's id in the API.
+    let id: String
+    let title: String
+    let mind: PalMind
+    /// What it's like, in a line.
+    let blurb: String
+    /// Claude: a safety decline is retried on another model in the same
+    /// request (`fallbacks`). Haiku has no such fallback, and the parameter
+    /// isn't sent for it.
+    var hasServerFallback = true
+    /// Claude: the web tools that filter results with code. Haiku takes the
+    /// basic ones.
+    var hasFilteringWebTools = true
+
+    nonisolated static let settingKey = "studyPal.brainModel"
+
+    static let fable = PalBrainModel(id: "claude-fable-5-2", title: "Claude Fable 5.2", mind: .claude,
+                                     blurb: "Anthropic's most capable model. Thinks longest, at twice Opus's price.")
+    static let opus = PalBrainModel(id: "claude-opus-5-5", title: "Claude Opus 5.5", mind: .claude,
+                                    blurb: "Anthropic's best for most work: smart and careful with tools. Her usual mind.")
+    static let sonnet = PalBrainModel(id: "claude-sonnet-5-5", title: "Claude Sonnet 5.5", mind: .claude,
+                                      blurb: "Quick and capable, at half Opus's price.")
+    static let haiku = PalBrainModel(id: "claude-haiku-5-5", title: "Claude Haiku 5.5", mind: .claude,
+                                     blurb: "The quickest and cheapest Claude. Best for simple help.",
+                                     hasServerFallback: false, hasFilteringWebTools: false)
+    static let astra = PalBrainModel(id: "gpt-6.2-astra", title: "GPT-6.2 Astra", mind: .openAI,
+                                     blurb: "OpenAI's most capable model, at four times Sol's price.")
+    static let sol = PalBrainModel(id: "gpt-6.2-sol", title: "GPT-6.2 Sol", mind: .openAI,
+                                   blurb: "OpenAI's go-to for agents: reads pages and handwriting, uses tools well.")
+    static let terra = PalBrainModel(id: "gpt-6.1-terra", title: "GPT-6.1 Terra", mind: .openAI,
+                                     blurb: "A step below Sol, at half its price.")
+    static let luna = PalBrainModel(id: "gpt-6-luna", title: "GPT-6 Luna", mind: .openAI,
+                                    blurb: "The quickest and cheapest GPT. Best for simple help.")
+
+    static let all: [PalBrainModel] = [fable, opus, sonnet, haiku, astra, sol, terra, luna]
+
+    static func model(_ id: String) -> PalBrainModel? {
+        all.first { $0.id == id }
     }
+
+    static func usual(for mind: PalMind) -> PalBrainModel {
+        mind == .claude ? opus : sol
+    }
+
+    /// The model picked in Settings: Claude Opus 5.5 unless changed (or
+    /// GPT-6.2 Sol, if GPT was picked before there was a model picker).
+    static var chosen: PalBrainModel {
+        let defaults = UserDefaults.standard
+        if let id = defaults.string(forKey: settingKey), let model = model(id) { return model }
+        return defaults.string(forKey: PalMind.settingKey) == PalMind.openAI.rawValue ? sol : opus
+    }
+
+    /// The model she'd use now: the one picked, or, when its company's key
+    /// isn't there, the other company's usual model. Nil without any key.
+    static var current: PalBrainModel? {
+        let chosen = chosen
+        if chosen.mind.hasKey { return chosen }
+        let other = usual(for: chosen.mind == .claude ? .openAI : .claude)
+        return other.mind.hasKey ? other : nil
+    }
+
+    /// Its prices, per million tokens.
+    var price: AIPrice? { AIPricing.text[id] }
 }
 
 /// The study pal's mind: one conversation for the whole app, whether you
-/// type to her or talk, wherever you are in it, with Claude Opus 5.5 or GPT-6.2 Sol.
+/// type to her or talk, wherever you are in it, with the Claude or GPT
+/// model picked in Settings.
 ///
 /// Every message you send starts with what's on your screen right then:
 /// the notebook or PDF that's open, pictures of what's on screen (when a
@@ -93,6 +166,9 @@ final class PalBrain {
     private struct Talk {
         var id = UUID()
         var mind: PalMind?
+        /// The model that thinks for the whole talk (thinking from one
+        /// model can't be read by another).
+        var model: PalBrainModel?
         var instructions = ""
         /// In the mind's own format.
         var tools: [[String: Any]] = []
@@ -229,14 +305,19 @@ final class PalBrain {
         status = nil
     }
 
-    /// Fixes the mind, instructions and tools for a new talk.
+    /// Fixes the model, instructions and tools for a new talk.
     private func beginTalk() {
-        let mind = PalMind.current
+        let model = PalBrainModel.current
         let canDraw = OpenAIKeyStore.hasKey
         let definitions = PalTools.definitions(canDraw: canDraw)
-        talk.mind = mind
+        talk.model = model
+        talk.mind = model?.mind
         talk.instructions = StudyPalCharacter.instructions(canDraw: canDraw)
-        talk.tools = mind == .claude ? Self.claudeTools(definitions) : definitions
+        if let model, model.mind == .claude {
+            talk.tools = Self.claudeTools(definitions, filteringWebTools: model.hasFilteringWebTools)
+        } else {
+            talk.tools = definitions
+        }
     }
 
     /// Writes down what's worth remembering from the talk so far (in the
@@ -397,7 +478,7 @@ final class PalBrain {
         while true {
             let round: Round
             do {
-                round = try await respond(effort: effort) { [weak self] text in
+                round = try await respond(effort: effort, turn: token) { [weak self] text in
                     self?.setReply(Self.joined(earlier, text), id: replyID)
                 }
             } catch {
@@ -467,19 +548,20 @@ final class PalBrain {
         if messages.count - rememberedCount >= 12 { rememberTalk() }
     }
 
-    /// Streams one response from the talk's mind.
-    private func respond(effort: String, onText: (String) -> Void) async throws -> Round {
+    /// Streams one response from the talk's mind. `turn`: the message it
+    /// answers, for the usage log.
+    private func respond(effort: String, turn: UUID, onText: (String) -> Void) async throws -> Round {
         switch talk.mind {
-        case .claude: try await respondWithClaude(effort: effort, onText: onText)
-        case .openAI, nil: try await respondWithGPT(effort: effort, onText: onText)
+        case .claude: try await respondWithClaude(effort: effort, turn: turn, onText: onText)
+        case .openAI, nil: try await respondWithGPT(effort: effort, turn: turn, onText: onText)
         }
     }
 
     // MARK: GPT
 
-    private func respondWithGPT(effort: String, onText: (String) -> Void) async throws -> Round {
+    private func respondWithGPT(effort: String, turn: UUID, onText: (String) -> Void) async throws -> Round {
         let body: [String: Any] = [
-            "model": OpenAIClient.brainModel,
+            "model": talk.model?.id ?? OpenAIClient.brainModel,
             "instructions": talk.instructions,
             "input": prunedHistory(),
             "tools": talk.tools,
@@ -492,7 +574,7 @@ final class PalBrain {
         var items: [Int: [String: Any]] = [:]
         var final: [String: Any]?
         var text = ""
-        try await OpenAIClient.streamResponse(body: body) { [weak self] event in
+        try await OpenAIClient.streamResponse(body: body, for: .brain, turn: turn) { [weak self] event in
             switch event["type"] as? String {
             case "response.output_item.added":
                 guard let item = event["item"] as? [String: Any] else { return }
@@ -564,9 +646,9 @@ final class PalBrain {
 
     // MARK: Claude
 
-    private func respondWithClaude(effort: String, onText: (String) -> Void) async throws -> Round {
-        let body: [String: Any] = [
-            "model": ClaudeClient.model,
+    private func respondWithClaude(effort: String, turn: UUID, onText: (String) -> Void) async throws -> Round {
+        var body: [String: Any] = [
+            "model": talk.model?.id ?? ClaudeClient.model,
             "max_tokens": 64_000,
             "system": talk.instructions,
             "tools": talk.tools,
@@ -577,14 +659,16 @@ final class PalBrain {
             "output_config": ["effort": effort],
             // Follow-up messages reuse the cached talk instead of paying for it again.
             "cache_control": ["type": "ephemeral"],
-            // On a safety-classifier decline, retry on a fallback model in the same call.
-            "fallbacks": "default",
             "messages": history,
         ]
+        if talk.model?.hasServerFallback ?? true {
+            // On a safety-classifier decline, retry on a fallback model in the same call.
+            body["fallbacks"] = "default"
+        }
         var blocks: [Int: [String: Any]] = [:]
         var partialInputs: [Int: String] = [:]
         var stopReason: String?
-        try await ClaudeClient.stream(body: body) { [weak self] event in
+        try await ClaudeClient.stream(body: body, for: .brain, turn: turn) { [weak self] event in
             switch event["type"] as? String {
             case "content_block_start":
                 guard let index = event["index"] as? Int, let block = event["content_block"] as? [String: Any] else { return }
@@ -694,12 +778,19 @@ final class PalBrain {
         }
     }
 
-    /// Claude's tools: hers as Claude tools, plus web search and web fetch.
-    private static func claudeTools(_ definitions: [[String: Any]]) -> [[String: Any]] {
-        var tools: [[String: Any]] = [
-            ["type": "web_search_20260209", "name": "web_search", "max_uses": 5],
-            ["type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5],
-        ]
+    /// Claude's tools: hers as Claude tools, plus web search and web fetch
+    /// (the versions that filter results with code, on the models that have
+    /// them).
+    private static func claudeTools(_ definitions: [[String: Any]], filteringWebTools: Bool) -> [[String: Any]] {
+        var tools: [[String: Any]] = filteringWebTools
+            ? [
+                ["type": "web_search_20260209", "name": "web_search", "max_uses": 5],
+                ["type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 5],
+            ]
+            : [
+                ["type": "web_search_20250305", "name": "web_search", "max_uses": 5],
+                ["type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 5],
+            ]
         for tool in definitions where tool["type"] as? String == "function" {
             guard let name = tool["name"] as? String, let parameters = tool["parameters"] else { continue }
             tools.append([

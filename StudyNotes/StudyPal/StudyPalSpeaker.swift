@@ -28,6 +28,9 @@ final class StudyPalSpeaker {
     @ObservationIgnored private var connectedVoice: String?
     /// This is an answer, not a voice sample: finishing it counts.
     @ObservationIgnored private var countsAsAnswer = false
+    /// The answer being read, so the usage log can add up what each one
+    /// cost. Nil for voice samples.
+    @ObservationIgnored private var answerID: UUID?
 
     private var voice: String {
         voiceOverride ?? UserDefaults.standard.string(forKey: Self.voiceKey) ?? Self.defaultVoice
@@ -114,6 +117,7 @@ final class StudyPalSpeaker {
         loggedFirstText = false
         loggedFirstAudio = false
         countsAsAnswer = true
+        answerID = UUID()
         connect()
     }
 
@@ -121,6 +125,7 @@ final class StudyPalSpeaker {
     func preview(_ text: String) {
         stop()
         countsAsAnswer = false
+        answerID = nil
         problem = nil
         isOnAnswer = true
         answerIsComplete = true
@@ -205,6 +210,9 @@ final class StudyPalSpeaker {
                 play(delta)
             }
         case "response.done":
+            // Cancelled pieces are billed for what they said too.
+            OpenAIUsage.recordVoice((event["response"] as? [String: Any])?["usage"] as? [String: Any],
+                                    model: OpenAIClient.voiceModel, turn: answerID)
             isResponding = false
             sayWhatsWaiting()
             watchPlayback()

@@ -15,7 +15,8 @@ import Foundation
 @MainActor
 enum OpenAIClient {
     /// Her mind: OpenAI's go-to model for agents, which reads pages and
-    /// handwriting and uses many tools well.
+    /// handwriting and uses many tools well. (Settings can pick another GPT
+    /// model: `PalBrainModel`.)
     static let brainModel = "gpt-6.2-sol"
     /// Quick, cheap jobs in the background (her memory).
     static let choresModel = "gpt-6-luna"
@@ -74,7 +75,9 @@ enum OpenAIClient {
         let (data, response) = try await perform { try await session.data(for: request) }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw OpenAIError(status: status, body: data) }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        OpenAIUsage.recordImage(json?["usage"] as? [String: Any], model: imageModel)
+        guard let json,
               let first = (json["data"] as? [[String: Any]])?.first,
               let base64 = first["b64_json"] as? String,
               let image = Data(base64Encoded: base64) else {
@@ -105,10 +108,12 @@ enum OpenAIClient {
 
     /// Sends a Responses request with `stream: true` and hands each server
     /// event (a parsed JSON object) to `onEvent` as it arrives. A failed or
-    /// errored response throws.
-    static func streamResponse(body: [String: Any], onEvent: ([String: Any]) -> Void) async throws {
+    /// errored response throws. The tokens it used go into the usage log as
+    /// `purpose`, with `turn`: the message it answers.
+    static func streamResponse(body: [String: Any], for purpose: AIPurpose, turn: UUID? = nil, onEvent: ([String: Any]) -> Void) async throws {
         var body = body
         body["stream"] = true
+        let model = body["model"] as? String ?? brainModel
         let request = try responsesRequest(body: body)
         let (bytes, response) = try await perform { try await session.bytes(for: request) }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
@@ -116,6 +121,15 @@ enum OpenAIClient {
             var data = Data()
             for try await byte in bytes { data.append(byte) }
             throw OpenAIError(status: status, body: data)
+        }
+        // The usage comes with the finished (or failed) response. A stream
+        // stopped before then has none to log.
+        var finished: [String: Any]?
+        defer {
+            if let finished {
+                OpenAIUsage.recordResponse(finished["usage"] as? [String: Any], output: finished["output"] as? [[String: Any]] ?? [],
+                                           model: model, purpose: purpose, turn: turn)
+            }
         }
         // Stopping in the middle is a cancellation, not a network error.
         try await perform {
@@ -131,8 +145,12 @@ enum OpenAIClient {
                     let error = event["error"] as? [String: Any] ?? event
                     throw OpenAIError(status: 0, message: error["message"] as? String ?? "", code: error["code"] as? String)
                 case "response.failed":
-                    let error = (event["response"] as? [String: Any])?["error"] as? [String: Any]
+                    finished = event["response"] as? [String: Any]
+                    let error = finished?["error"] as? [String: Any]
                     throw OpenAIError(status: 0, message: error?["message"] as? String ?? "", code: error?["code"] as? String)
+                case "response.completed", "response.incomplete":
+                    finished = event["response"] as? [String: Any]
+                    onEvent(event)
                 default:
                     onEvent(event)
                 }
@@ -141,8 +159,8 @@ enum OpenAIClient {
     }
 
     /// A short request that isn't streamed, for chores in the background.
-    /// Returns the text it wrote.
-    static func respond(body: [String: Any]) async throws -> String {
+    /// Returns the text it wrote, and logs what it used as `purpose`.
+    static func respond(body: [String: Any], for purpose: AIPurpose) async throws -> String {
         var body = body
         body["stream"] = false
         let request = try responsesRequest(body: body)
@@ -150,6 +168,8 @@ enum OpenAIClient {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw OpenAIError(status: status, body: data) }
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        OpenAIUsage.recordResponse(json?["usage"] as? [String: Any], output: json?["output"] as? [[String: Any]] ?? [],
+                                   model: body["model"] as? String ?? choresModel, purpose: purpose, turn: nil)
         return outputText(of: json)
     }
 

@@ -1,11 +1,12 @@
 import SwiftUI
 
 /// Memor's settings, grouped like the iPad's own:
-/// - Study Pal: which model is her mind (Claude or GPT), and your API keys.
-///   Claude needs an Anthropic key; her voice and her pictures need an
-///   OpenAI key either way.
+/// - Study Pal: which model is her mind (a Claude or GPT model), and your
+///   API keys. Claude needs an Anthropic key; her voice and her pictures
+///   need an OpenAI key either way.
 /// - Her name, her memory, reading replies aloud, her voice, her sounds,
 ///   and staying on screen outside Memor.
+/// - Usage: what her AI requests used and cost, and a calculator.
 /// - About: what leaves your iPad, and the version.
 ///
 /// Opened without any key, it goes straight to the Anthropic key, and
@@ -17,7 +18,7 @@ struct SettingsView: View {
     @AppStorage(StudyPalSpeaker.voiceKey) private var palVoice = StudyPalSpeaker.defaultVoice
     @AppStorage(StudyPalCharacter.nameKey) private var palName = ""
     @AppStorage(PalMemoryStore.isOnKey) private var remembers = true
-    @AppStorage(PalMind.settingKey) private var mind = PalMind.claude.rawValue
+    @AppStorage(PalBrainModel.settingKey) private var brainModel = ""
     @AppStorage(PalWakeListener.isEnabledKey) private var wakeWord = true
     @State private var hasClaudeKey = APIKeyStore.hasKey
     @State private var hasOpenAIKey = OpenAIKeyStore.hasKey
@@ -42,7 +43,13 @@ struct SettingsView: View {
                 }
             }
         }
-        .onChange(of: mind) { Pal.shared.keyChanged() }
+        .onChange(of: brainModel) { Pal.shared.keyChanged() }
+    }
+
+    /// The model picked in Settings (read through `brainModel`, so the
+    /// page updates when it changes).
+    private var chosenModel: PalBrainModel {
+        PalBrainModel.model(brainModel) ?? PalBrainModel.chosen
     }
 
     private func keysChanged() {
@@ -54,12 +61,11 @@ struct SettingsView: View {
     private var settings: some View {
         Form {
             Section {
-                Picker(selection: $mind) {
-                    ForEach(PalMind.allCases) { mind in
-                        Text(mind.title).tag(mind.rawValue)
-                    }
+                NavigationLink {
+                    BrainModelPage()
                 } label: {
-                    SettingsLabel("Her Mind", systemImage: "brain.head.profile", color: .orange)
+                    SettingsRow("Her Mind", systemImage: "brain.head.profile", color: .orange,
+                                value: chosenModel.title)
                 }
                 NavigationLink {
                     APIKeyPage(kind: .claude) { keysChanged() }
@@ -118,6 +124,24 @@ struct SettingsView: View {
 
             Section {
                 NavigationLink {
+                    UsagePage()
+                } label: {
+                    SettingsRow("AI Usage", systemImage: "chart.bar.fill", color: .cyan,
+                                value: AIUsageFormat.cost(AIUsageStore.shared.summary(since: AIUsageFormat.monthStart).total.cost))
+                }
+                NavigationLink {
+                    UsageCalculatorPage()
+                } label: {
+                    SettingsLabel("Cost Calculator", systemImage: "dollarsign", color: .green)
+                }
+            } header: {
+                Text("Usage")
+            } footer: {
+                Text("What her mind, memory, voice, ears and pictures cost over the last 30 days, at list prices, and what a month would cost on each model.")
+            }
+
+            Section {
+                NavigationLink {
                     PrivacyPage()
                 } label: {
                     SettingsLabel("Privacy", systemImage: "hand.raised.fill", color: .blue)
@@ -136,12 +160,10 @@ struct SettingsView: View {
     }
 
     private var mindFooter: String {
-        let chosen = PalMind(rawValue: mind) ?? .claude
-        var text = chosen == .claude
-            ? "Claude Opus 5.5 thinks for her, with your Anthropic key."
-            : "GPT-6.2 Sol thinks for her, with your OpenAI key."
-        if !chosen.hasKey {
-            text += " Add its key above" + (PalMind.current.map { "; until then, \($0.title) does." } ?? ".")
+        let chosen = chosenModel
+        var text = "\(chosen.title) thinks for her, with your \(chosen.mind.company) key."
+        if !chosen.mind.hasKey {
+            text += " Add that key below" + (PalBrainModel.current.map { "; until then, \($0.title) does." } ?? ".")
         }
         text += " Her voice and the pictures she draws use your OpenAI key either way. A change takes effect from her next talk (or tap New Topic in her card)."
         return text
@@ -159,7 +181,7 @@ struct SettingsView: View {
 
 /// A setting's icon: a white symbol on a colored rounded square, as in the
 /// iPad's Settings.
-private struct SettingsIcon: View {
+struct SettingsIcon: View {
     let systemImage: String
     let color: Color
 
@@ -172,7 +194,7 @@ private struct SettingsIcon: View {
     }
 }
 
-private struct SettingsLabel: View {
+struct SettingsLabel: View {
     let title: String
     let systemImage: String
     let color: Color
@@ -193,7 +215,7 @@ private struct SettingsLabel: View {
 }
 
 /// A label with its current value on the trailing side.
-private struct SettingsRow: View {
+struct SettingsRow: View {
     let title: String
     let systemImage: String
     let color: Color
@@ -449,7 +471,7 @@ private struct PrivacyPage: View {
     var body: some View {
         Form {
             Section("Stays on Your iPad") {
-                Text("Your API keys, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her reminders, which are notifications on this iPad.")
+                Text("Your API keys, in the Keychain. Your voice: what you say to your study pal is turned into text on the iPad. Her reminders, which are notifications on this iPad. The AI usage log in Settings → AI Usage: which model each request went to, its token counts and its cost, never what was said.")
             }
             Section("Kept in Your iCloud") {
                 Text("Your notebooks, pages, PDFs, handwriting, typed notes and chats with her. Her memory, which you can read and delete in Settings → Memory, her name and your settings. They're saved to your own iCloud, never to a Memor server, so they're on all your iPads and come back if you reinstall Memor.")

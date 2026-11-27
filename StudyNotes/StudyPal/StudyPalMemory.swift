@@ -412,7 +412,7 @@ enum PalMemoryWriter {
                         "reasoning": ["effort": "low"],
                         "max_output_tokens": 4_000,
                         "store": false,
-                    ])
+                    ], for: .memory)
                 }
                 guard let update = PalMemoryUpdate(reply: reply) else {
                     log.error("The memory reply wasn't JSON.")
@@ -488,7 +488,7 @@ enum PalMemoryWriter {
             "output_config": ["effort": "low"],
             "system": prompt,
             "messages": [["role": "user", "content": input]],
-        ]) { event in
+        ], for: .memory) { event in
             guard event["type"] as? String == "content_block_delta",
                   let delta = event["delta"] as? [String: Any],
                   delta["type"] as? String == "text_delta",

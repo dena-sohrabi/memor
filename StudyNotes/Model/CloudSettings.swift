@@ -13,6 +13,7 @@ enum CloudSettings {
         StudyPalCharacter.nameKey,
         "studyPal.nameAsked",
         PalMind.settingKey,
+        PalBrainModel.settingKey,
         Pal.modeKey,
         StudyPalSpeaker.voiceKey,
         StudyPalSpeaker.isEnabledKey,

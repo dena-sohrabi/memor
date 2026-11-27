@@ -291,6 +291,11 @@ final class PalTranscriber {
     private var failure: String?
     private var isDone = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// How much audio went to OpenAI, for the usage log (it's billed by
+    /// the minute).
+    private var sentBytes = 0
+    /// The length OpenAI reports, when it does.
+    private var reportedSeconds: Double?
 
     init(context: SpeechContext) throws {
         socket = try OpenAIClient.transcriptionSocket()
@@ -370,6 +375,7 @@ final class PalTranscriber {
     private func flush() {
         guard !batch.isEmpty else { return }
         send(["type": "input_audio_buffer.append", "audio": batch.base64EncodedString()])
+        sentBytes += batch.count
         batch = Data()
     }
 
@@ -383,6 +389,10 @@ final class PalTranscriber {
         case "conversation.item.input_audio_transcription.completed":
             guard let item = event["item_id"] as? String else { return }
             transcripts[item] = event["transcript"] as? String ?? ""
+            if let usage = event["usage"] as? [String: Any], usage["type"] as? String == "duration",
+               let seconds = (usage["seconds"] as? NSNumber)?.doubleValue {
+                reportedSeconds = (reportedSeconds ?? 0) + seconds
+            }
             if !items.contains(item) { items.append(item) }
             if item == committedItem { end(failing: nil) }
         case "input_audio_buffer.committed":
@@ -408,6 +418,8 @@ final class PalTranscriber {
         guard !isDone else { return }
         isDone = true
         if let message { failure = message }
+        let seconds = reportedSeconds ?? Double(sentBytes) / Double(Self.bytesPerSecond)
+        OpenAIUsage.recordListening(seconds: seconds, model: OpenAIClient.transcriptionModel)
         receiveTask?.cancel()
         socket.cancel(with: .normalClosure, reason: nil)
         let waiting = waiters
