@@ -396,8 +396,10 @@ enum PalRender {
 /// it's wanted, on screen, covering nothing that's there.
 enum PalSpot {
     /// The top-left corner for something of `size`. `taken` is everything
-    /// on the page; `preferred` where it would ideally go.
-    static func find(for size: CGSize, preferred: CGPoint, visible: CGRect, taken: [CGRect], below fallbackY: CGFloat) -> CGPoint {
+    /// on the page; `preferred` where it would ideally go. `allowed`, when
+    /// given, says where things may go at all (on a notebook's paper sheets
+    /// in Pages mode).
+    static func find(for size: CGSize, preferred: CGPoint, visible: CGRect, taken: [CGRect], below fallbackY: CGFloat, allowed: ((CGRect) -> Bool)? = nil) -> CGPoint {
         let blocked = taken.filter { !$0.isNull && !$0.isEmpty }.map { $0.insetBy(dx: -16, dy: -16) }
         let onScreen = visible.insetBy(dx: 12, dy: 12)
         // Spots on a grid around the preferred one, up to a screen and a
@@ -420,6 +422,7 @@ enum PalSpot {
         candidates.sort { $0.cost < $1.cost }
         return candidates.first { candidate in
             let frame = CGRect(origin: candidate.origin, size: size)
+            if let allowed, !allowed(frame) { return false }
             return !blocked.contains { $0.intersects(frame) }
         }?.origin ?? CGPoint(x: preferred.x, y: fallbackY + 40)
     }

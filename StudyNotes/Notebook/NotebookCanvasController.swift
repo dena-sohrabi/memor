@@ -76,12 +76,35 @@ final class NotebookCanvasView: PKCanvasView {
 /// its zoom, so their frames are in canvas points. The canvas itself is
 /// transparent, with the dots drawn by `DotGridView` behind it.
 ///
-/// Switching pages replaces this controller with a new one.
+/// In Pages mode (Settings), the same canvas shows sheets of paper stacked
+/// top to bottom on a desk (`NotebookSheets`), starting at the middle where
+/// a new page starts, so everything keeps its place. The page scrolls and
+/// zooms only around the sheets, ink stays on them, and text boxes and
+/// images land on them.
+///
+/// Switching pages, or between the infinite canvas and Pages, replaces this
+/// controller with a new one.
 final class NotebookCanvasController: UIViewController {
     static let canvasExtent: CGFloat = 100_000
 
     let page: NotebookPage
     let modelContext: ModelContext
+    /// The sheets of paper in Pages mode; nil on the infinite canvas.
+    private var sheets: NotebookSheets?
+    /// Pages mode: the desk and the sheets, behind the dots.
+    private var sheetsView: NotebookSheetsView?
+    /// Pages mode: everything on the page, as of the last change, for how
+    /// many sheets there are and how far the page scrolls.
+    private var sheetContent: CGRect?
+    /// Pages mode: notices where the Pencil comes down, so a stroke can't
+    /// start on the desk.
+    private var sheetGuard: StrokeWatcher?
+    /// Pages mode: how many strokes there were when the Pencil came down on
+    /// a sheet, so the stroke it draws can be kept to that sheet.
+    private var strokeCountAtPencilDown: Int?
+    private var pencilDownCount = 0
+    /// Set while a stroke is being cut to its sheet.
+    private var isTrimmingStroke = false
     var onTextModeEnded: (() -> Void)?
     /// A finger tapped empty paper: show or hide the toolbars.
     var onToggleChrome: (() -> Void)?
@@ -112,6 +135,7 @@ final class NotebookCanvasController: UIViewController {
     private let imageOverlay = ImageSelectionOverlay()
     private let textLayer = PassthroughView()
     private var eraserReturn: EraserAutoReturn?
+    private var pencilFocus: PencilFocusKeeper?
     private var undoTaps: UndoTapGestures?
     private var quickLine: QuickLine?
     /// Shared by every page in the window, so the chosen pen stays.
@@ -153,7 +177,8 @@ final class NotebookCanvasController: UIViewController {
         lookup: { [weak self] id in self?.page.textBoxes?.first { $0.id == id && !$0.isDeleted } },
         container: { [weak self] _ in self?.textLayer },
         contentChanged: { [weak self] in self?.scheduleSave() },
-        editingEnded: { [weak self] in self?.restoreCanvasFocusSoon() }
+        editingEnded: { [weak self] in self?.restoreCanvasFocusSoon() },
+        keepOnPaper: { [weak self] frame in self?.textBoxOnPaper(frame) ?? frame }
     ))
 
     private lazy var images = CanvasImageCoordinator(
@@ -167,16 +192,19 @@ final class NotebookCanvasController: UIViewController {
             contentChanged: { [weak self] in self?.scheduleSave() },
             dropText: { [weak self] text, point in
                 _ = self?.textBoxes.insertBox(at: CGPoint(x: point.x - 8, y: point.y - 22), width: 320, text: text)
-            }
+            },
+            keepOnPaper: { [weak self] frame in self?.onPaper(frame, shrinking: true) ?? frame }
         )
     )
 
-    init(page: NotebookPage, modelContext: ModelContext, toolPicker: PKToolPicker, isTextMode: Bool) {
+    init(page: NotebookPage, modelContext: ModelContext, toolPicker: PKToolPicker, isTextMode: Bool, layout: NotebookLayout = .infinite) {
         self.page = page
         self.modelContext = modelContext
         self.toolPicker = toolPicker
         self.isTextMode = isTextMode
         super.init(nibName: nil, bundle: nil)
+        // Counted again once the drawing is loaded.
+        if layout == .pages { sheets = NotebookSheets(contentBottom: nil) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -188,6 +216,14 @@ final class NotebookCanvasController: UIViewController {
         // Paper stays light in dark mode, so ink colors and text match the thumbnails.
         view.overrideUserInterfaceStyle = .light
         view.backgroundColor = Paper.color
+        if sheets != nil {
+            // Pages: sheets of paper on a desk, with the dots only on the sheets.
+            view.backgroundColor = NotebookSheets.deskColor
+            let sheetsView = NotebookSheetsView(frame: view.bounds)
+            sheetsView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.addSubview(sheetsView)
+            self.sheetsView = sheetsView
+        }
         view.addSubview(dotGrid)
 
         canvasView.frame = view.bounds
@@ -208,6 +244,10 @@ final class NotebookCanvasController: UIViewController {
         }
         canvasView.contentSize = CGSize(width: Self.canvasExtent, height: Self.canvasExtent)
         view.addSubview(canvasView)
+        if sheets != nil {
+            sheetContent = contentBounds()
+            sheets = NotebookSheets(contentBottom: sheetContent?.maxY)
+        }
 
         for layer in [imageLayer, textLayer] {
             layer.layer.anchorPoint = .zero
@@ -263,7 +303,33 @@ final class NotebookCanvasController: UIViewController {
         toolPicker.addObserver(self)
         toolPicker.setVisible(showsToolPicker, forFirstResponder: canvasView)
         eraserReturn = EraserAutoReturn(toolPicker: toolPicker)
+        pencilFocus = PencilFocusKeeper(
+            on: canvasView,
+            toolPicker: toolPicker,
+            isHandledByPalette: { [weak self] in
+                guard let self else { return true }
+                return self.canvasView.isFirstResponder && self.toolPicker.isVisible
+            },
+            reclaim: { [weak self] in self?.reclaimFocus() ?? false },
+            showToolbars: { [weak self] in
+                guard let self, !self.showsToolPicker else { return }
+                self.onToggleChrome?()
+            }
+        )
         quickLine = QuickLine(canvasView: canvasView, previewHost: view)
+        if sheets != nil {
+            let watcher = StrokeWatcher()
+            watcher.coordinateView = textLayer
+            watcher.cancelsTouchesInView = false
+            watcher.delaysTouchesBegan = false
+            watcher.delaysTouchesEnded = false
+            watcher.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+            watcher.delegate = self
+            watcher.onBegan = { [weak self] point in self?.pencilCameDown(at: point) }
+            watcher.onEnded = { [weak self] _ in self?.pencilLifted() }
+            canvasView.addGestureRecognizer(watcher)
+            sheetGuard = watcher
+        }
 
         undoTaps = UndoTapGestures(
             on: canvasView,
@@ -280,6 +346,7 @@ final class NotebookCanvasController: UIViewController {
         let size = canvasView.bounds.size
         guard size.width > 0, size.height > 0 else { return }
         let origin = view.window.map { view.convert(CGPoint.zero, to: $0) }
+        if sheets != nil, size != lastLayoutSize { updateSheetZoomLimits() }
         if !didRestoreViewport {
             didRestoreViewport = true
             restoreViewport()
@@ -299,6 +366,12 @@ final class NotebookCanvasController: UIViewController {
                     canvasView.contentOffset.y += origin.y - lastLayoutOrigin.y
                 }
                 if size.height < lastLayoutSize.height { keepEditingBoxInView() }
+            }
+            if sheets != nil {
+                // Still on the sheets in the new shape.
+                updateScrollLimits()
+                let offset = clampedOffset(canvasView.contentOffset)
+                if offset != canvasView.contentOffset { canvasView.contentOffset = offset }
             }
         }
         lastLayoutSize = size
@@ -343,6 +416,19 @@ final class NotebookCanvasController: UIViewController {
         toolPicker.removeObserver(canvasView)
         toolPicker.removeObserver(self)
         eraserReturn?.stop()
+        pencilFocus?.stop()
+    }
+
+    /// Gives the canvas the keyboard focus back, and the pen palette with
+    /// it, unless a text box on the page is being typed in or a sheet is up.
+    /// Returns whether the canvas has the focus now.
+    @discardableResult
+    private func reclaimFocus() -> Bool {
+        guard !isLeaving, view.window != nil, presentedViewController == nil,
+              textBoxes.editingBox == nil else { return false }
+        if !canvasView.isFirstResponder { canvasView.becomeFirstResponder() }
+        toolPicker.setVisible(showsToolPicker, forFirstResponder: canvasView)
+        return canvasView.isFirstResponder
     }
 
     /// The undo steps point at this canvas and its boxes, which are going away.
@@ -384,6 +470,9 @@ final class NotebookCanvasController: UIViewController {
         showsToolPicker = visible
         guard isViewLoaded else { return }
         toolPicker.setVisible(visible, forFirstResponder: canvasView)
+        // The palette shows only for the focused canvas: if something else
+        // took the focus, showing the toolbars takes it back.
+        if visible { reclaimFocus() }
     }
 
     // MARK: Zoom
@@ -411,8 +500,15 @@ final class NotebookCanvasController: UIViewController {
         zoom(around: center, scale: target)
     }
 
-    /// Fits everything on the page on screen, up to 200%.
+    /// Fits everything on the page on screen, up to 200%. In Pages mode,
+    /// fits a sheet's width to the screen instead, staying at the same
+    /// spot top to bottom.
     func zoomToFit() {
+        if sheets != nil {
+            let scale = min(NotebookSheets.fitWidthZoom(for: canvasView.bounds.width), canvasView.maximumZoomScale)
+            zoom(around: CGPoint(x: NotebookSheets.rect(at: 0).midX, y: visibleCenter.y), scale: max(scale, canvasView.minimumZoomScale))
+            return
+        }
         guard let content = contentBounds() else {
             zoom(to: 1)
             return
@@ -430,8 +526,169 @@ final class NotebookCanvasController: UIViewController {
         canvasView.zoom(to: rect, animated: true)
         Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(450))
+            self?.settleOnSheets()
             self?.updateTextSharpness()
             self?.scheduleViewportSave()
+        }
+    }
+
+    // MARK: Sheets of paper (Pages mode)
+
+    /// Pages mode: how far out the page zooms for this window size.
+    private func updateSheetZoomLimits() {
+        guard sheets != nil else { return }
+        canvasView.minimumZoomScale = NotebookSheets.minimumZoom(for: canvasView.bounds.size)
+        if didRestoreViewport, canvasView.zoomScale < canvasView.minimumZoomScale {
+            canvasView.zoomScale = canvasView.minimumZoomScale
+        }
+    }
+
+    /// Pages mode: the page scrolls only as far as the sheets go (and
+    /// anything from the infinite canvas left off them), with the sheets
+    /// centered side to side when they're narrower than the screen. Done
+    /// with the scroll view's insets, which are in zoomed points, so it's
+    /// redone at every zoom.
+    private func updateScrollLimits() {
+        guard let sheets else { return }
+        let size = canvasView.bounds.size
+        guard size.width > 0, size.height > 0 else { return }
+        let zoom = canvasView.zoomScale
+        let area = sheets.scrollArea(content: sheetContent)
+        let zoomed = CGRect(x: area.minX * zoom, y: area.minY * zoom, width: area.width * zoom, height: area.height * zoom)
+        let content = canvasView.contentSize
+        let sides = max((size.width - zoomed.width) / 2, 0)
+        // Shorter than the screen: the sheets start at the top.
+        let below = max(size.height - zoomed.height, 0)
+        let insets = UIEdgeInsets(
+            top: -zoomed.minY,
+            left: sides - zoomed.minX,
+            bottom: below - (content.height - zoomed.maxY),
+            right: sides - (content.width - zoomed.maxX)
+        )
+        if canvasView.contentInset != insets { canvasView.contentInset = insets }
+    }
+
+    /// `offset` moved as little as it takes to stay within the scroll limits.
+    private func clampedOffset(_ offset: CGPoint) -> CGPoint {
+        guard sheets != nil else { return offset }
+        let inset = canvasView.contentInset
+        let size = canvasView.bounds.size
+        let content = canvasView.contentSize
+        let minX = -inset.left
+        let minY = -inset.top
+        let maxX = max(content.width + inset.right - size.width, minX)
+        let maxY = max(content.height + inset.bottom - size.height, minY)
+        return CGPoint(x: min(max(offset.x, minX), maxX), y: min(max(offset.y, minY), maxY))
+    }
+
+    /// Pages mode: after a zoom, or when sheets went away, scrolls back onto
+    /// the sheets if the page ended up past them.
+    private func settleOnSheets() {
+        guard sheets != nil, !canvasView.isTracking, !canvasView.isDecelerating, !canvasView.isZooming else { return }
+        updateScrollLimits()
+        let offset = clampedOffset(canvasView.contentOffset)
+        if abs(offset.x - canvasView.contentOffset.x) > 0.5 || abs(offset.y - canvasView.contentOffset.y) > 0.5 {
+            canvasView.setContentOffset(offset, animated: true)
+        }
+    }
+
+    /// Pages mode: counts the sheets again after a change, so there's
+    /// always an empty one after the last one written on.
+    private func updateSheets() {
+        guard var current = sheets else { return }
+        sheetContent = contentBounds()
+        let count = NotebookSheets.count(forContentBottom: sheetContent?.maxY)
+        if count != current.count {
+            current.count = count
+            sheets = current
+            updateDots()
+        }
+        updateScrollLimits()
+        // With fewer sheets (erased or undone), the page may now be past the last one.
+        settleOnSheets()
+    }
+
+    /// Pages mode: `rect` moved onto the nearest sheet; unchanged on the
+    /// infinite canvas.
+    private func onPaper(_ rect: CGRect, inset: CGFloat = 0, shrinking: Bool = false) -> CGRect {
+        sheets?.fit(rect, inset: inset, shrinking: shrinking) ?? rect
+    }
+
+    /// A text box's frame kept on paper: no wider than a sheet, with its
+    /// top-left corner on it.
+    private func textBoxOnPaper(_ frame: CGRect) -> CGRect {
+        guard sheets != nil else { return frame }
+        let width = min(frame.width, NotebookSheets.sheetSize.width)
+        let height = min(frame.height, NotebookSheets.sheetSize.height)
+        let kept = onPaper(CGRect(x: frame.minX, y: frame.minY, width: width, height: height))
+        return CGRect(x: kept.minX, y: kept.minY, width: width, height: frame.height)
+    }
+
+    /// The Pencil came down at `point` (canvas points). With a pen, a
+    /// stroke that starts on the desk is called off before it's drawn.
+    private func pencilCameDown(at point: CGPoint) {
+        strokeCountAtPencilDown = nil
+        pencilDownCount += 1
+        guard let sheets, canvasView.tool is PKInkingTool, !isTextMode,
+              canvasView.drawingGestureRecognizer.isEnabled else { return }
+        guard sheets.sheet(containing: point) != nil else {
+            // Turning PencilKit's drawing off and on again cancels the stroke.
+            canvasView.drawingGestureRecognizer.isEnabled = false
+            canvasView.drawingGestureRecognizer.isEnabled = true
+            canvasView.isScrollEnabled = true
+            lastPencilUse = CACurrentMediaTime()
+            return
+        }
+        strokeCountAtPencilDown = canvasView.drawing.strokes.count
+    }
+
+    private func pencilLifted() {
+        // The stroke may land in the drawing a moment after the Pencil lifts.
+        let count = pencilDownCount
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard let self, self.pencilDownCount == count else { return }
+            self.strokeCountAtPencilDown = nil
+        }
+    }
+
+    /// Pages mode: the stroke just drawn is cut off at the edge of the sheet
+    /// it started on, so no ink goes on the desk or the next sheet. It's
+    /// cut with a mask, so its points stay as drawn, and undo takes it away
+    /// whole, as usual.
+    private func keepNewStrokeOnSheet() {
+        guard let sheets, !isTrimmingStroke, let start = strokeCountAtPencilDown,
+              quickLine?.isStraightening != true else { return }
+        if let manager = canvasView.undoManager, manager.isUndoing || manager.isRedoing { return }
+        var drawing = canvasView.drawing
+        guard drawing.strokes.count == start + 1, let stroke = drawing.strokes.last,
+              stroke.mask == nil, let first = stroke.path.first else { return }
+        let startPoint = first.location.applying(stroke.transform)
+        let sheet = sheets.sheet(containing: startPoint) ?? NotebookSheets.rect(at: sheets.nearestIndex(toY: startPoint.y))
+        guard !sheet.contains(stroke.renderBounds) else { return }
+        // The mask is in the stroke's own points, before its transform.
+        let mask = UIBezierPath(rect: sheet)
+        mask.apply(stroke.transform.inverted())
+        drawing.strokes[drawing.strokes.count - 1].mask = mask
+        let before = canvasView.drawing.dataRepresentation()
+        isTrimmingStroke = true
+        canvasView.drawing = drawing
+        isTrimmingStroke = false
+        // Registered in the same turn as PencilKit's own step for the
+        // stroke, so one undo takes both back.
+        canvasView.undoManager?.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.setDrawingKeepingUndo(before) }
+        }
+    }
+
+    private func setDrawingKeepingUndo(_ data: Data) {
+        guard let drawing = try? PKDrawing(data: data) else { return }
+        let current = canvasView.drawing.dataRepresentation()
+        isTrimmingStroke = true
+        canvasView.drawing = drawing
+        isTrimmingStroke = false
+        canvasView.undoManager?.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.setDrawingKeepingUndo(current) }
         }
     }
 
@@ -531,6 +788,7 @@ final class NotebookCanvasController: UIViewController {
 
     private func scheduleSave() {
         contentVersion += 1
+        updateSheets()
         saveDebouncer.schedule { [weak self] in self?.save() }
     }
 
@@ -557,6 +815,10 @@ final class NotebookCanvasController: UIViewController {
 
     private func restoreViewport() {
         let size = canvasView.bounds.size
+        if sheets != nil {
+            restoreSheetViewport(size: size)
+            return
+        }
         let start = Self.canvasExtent / 2
         let viewport = page.viewport
             ?? Viewport(centerX: start + size.width / 2, centerY: start + size.height / 2, zoom: 1)
@@ -583,6 +845,53 @@ final class NotebookCanvasController: UIViewController {
         updateTextSharpness()
         // After this layout pass, which may be part of a SwiftUI update.
         Task { [weak self] in self?.onZoomChanged?(zoom) }
+    }
+
+    /// Pages mode: back where the page was left in Pages mode, or the first
+    /// time, the top of the first sheet with its width filling the screen.
+    /// (The infinite canvas keeps its own spot, in `page.viewport`.)
+    private func restoreSheetViewport(size: CGSize) {
+        let saved = Self.savedSheetViewport(for: page.id)
+        let fitWidth = NotebookSheets.fitWidthZoom(for: size.width)
+        let wanted = saved.map { CGFloat($0.zoom) } ?? fitWidth
+        let zoom = min(max(wanted, canvasView.minimumZoomScale), canvasView.maximumZoomScale)
+        let first = NotebookSheets.rect(at: 0)
+        let topOfSheets = CGPoint(x: first.midX, y: first.minY - NotebookSheets.margin + size.height / zoom / 2)
+        var center = saved.map { CGPoint(x: $0.centerX, y: $0.centerY) } ?? topOfSheets
+
+        // Safety net: never open on empty paper when the page has something on it.
+        let visible = CGRect(
+            x: center.x - size.width / zoom / 2,
+            y: center.y - size.height / zoom / 2,
+            width: size.width / zoom,
+            height: size.height / zoom
+        )
+        if let content = contentBounds(), !visible.intersects(content) {
+            center = CGPoint(x: first.midX, y: content.minY - NotebookSheets.margin + size.height / zoom / 2)
+        }
+
+        canvasView.zoomScale = zoom
+        updateTextLayerScale()
+        updateScrollLimits()
+        canvasView.contentOffset = clampedOffset(CGPoint(
+            x: center.x * zoom - size.width / 2,
+            y: center.y * zoom - size.height / 2
+        ))
+        updateTextSharpness()
+        // After this layout pass, which may be part of a SwiftUI update.
+        Task { [weak self] in self?.onZoomChanged?(zoom) }
+    }
+
+    /// Where each page was left in Pages mode, on this iPad. Kept apart
+    /// from `page.viewport`, so the infinite canvas still opens where it was.
+    private static func sheetViewportKey(for id: UUID) -> String {
+        "notebook.pagesViewport.\(id.uuidString)"
+    }
+
+    private static func savedSheetViewport(for id: UUID) -> Viewport? {
+        guard let values = UserDefaults.standard.array(forKey: sheetViewportKey(for: id)) as? [Double],
+              values.count == 3, values.allSatisfy(\.isFinite), values[2] > 0 else { return nil }
+        return Viewport(centerX: values[0], centerY: values[1], zoom: values[2])
     }
 
     /// Everything on the page (ink, text, images), in canvas points.
@@ -612,6 +921,12 @@ final class NotebookCanvasController: UIViewController {
         // torn down can report a size that would save the wrong spot.
         guard isModelAlive, didRestoreViewport, canvasView.window != nil,
               canvasView.bounds.width > 0, canvasView.bounds.height > 0 else { return }
+        if sheets != nil {
+            let viewport = currentViewport()
+            UserDefaults.standard.set([viewport.centerX, viewport.centerY, viewport.zoom], forKey: Self.sheetViewportKey(for: page.id))
+            viewportVersion += 1
+            return
+        }
         page.viewport = currentViewport()
         viewportVersion += 1
         try? modelContext.save()
@@ -630,6 +945,11 @@ final class NotebookCanvasController: UIViewController {
 
     private func updateDots() {
         dotGrid.update(contentOffset: canvasView.contentOffset, zoom: canvasView.zoomScale, viewportSize: canvasView.bounds.size)
+        // Pages mode: the sheets follow the canvas, and the dots show only on them.
+        if let sheets, let sheetsView {
+            let frames = sheetsView.update(sheets: sheets, contentOffset: canvasView.contentOffset, zoom: canvasView.zoomScale)
+            dotGrid.clip(to: frames.map { sheetsView.convert($0, to: view) })
+        }
     }
 
     // MARK: Text boxes
@@ -667,8 +987,8 @@ final class NotebookCanvasController: UIViewController {
     private func restoreCanvasFocusSoon() {
         // Wait a turn: if another box is taking focus, leave it alone.
         Task { [weak self] in
-            guard let self, !self.isLeaving, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
-            self.canvasView.becomeFirstResponder()
+            guard let self, self.textBoxes.editingBox == nil else { return }
+            self.reclaimFocus()
         }
     }
 }
@@ -676,12 +996,16 @@ final class NotebookCanvasController: UIViewController {
 extension NotebookCanvasController: PKCanvasViewDelegate {
     func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
         quickLine?.drawingDidChange()
+        keepNewStrokeOnSheet()
         scheduleSave()
     }
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
-        // Writing with the Pencil ends image editing.
+        // Writing with the Pencil ends image editing, and takes the focus
+        // back from anything else (the study pal's chat), so the palette,
+        // double-tap and squeeze work again.
         images.deselect()
+        pencilFocus?.pencilTouchedPage()
         // A hand resting on the screen while writing mustn't scroll the page.
         canvasView.isScrollEnabled = false
         // Nor hide the toolbars (see `isPalmOrWritingHand`).
@@ -701,6 +1025,7 @@ extension NotebookCanvasController: PKCanvasViewDelegate {
 
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
         updateTextLayerScale()
+        updateScrollLimits()
         updateDots()
         images.updateOverlay()
         onZoomChanged?(scrollView.zoomScale)
@@ -752,8 +1077,10 @@ extension NotebookCanvasController: PKToolPickerObserver {
 
 extension NotebookCanvasController: UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        // The deselect tap and the paste press never block anything else.
+        // The deselect tap and the paste press never block anything else,
+        // nor does watching where the Pencil comes down in Pages mode.
         gestureRecognizer === deselectTap || gestureRecognizer === pastePress
+            || (sheetGuard != nil && gestureRecognizer === sheetGuard)
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -885,7 +1212,7 @@ extension NotebookCanvasController: PalPage {
         let ink: [[String: Any]] = words.map { word in
             ["id": word.id, "line": word.line, "x": word.rect.minX.rounded(), "y": word.rect.minY.rounded(), "width": word.rect.width.rounded(), "height": word.rect.height.rounded()]
         }
-        let description: [String: Any] = [
+        var description: [String: Any] = [
             "coordinates": "Page points. x grows to the right, y grows down.",
             "visible_area": [
                 "x": visible.minX.rounded(), "y": visible.minY.rounded(),
@@ -895,6 +1222,13 @@ extension NotebookCanvasController: PalPage {
             "handwriting": ink,
             "note": "Handwriting is listed word by word (around the screen) with ids for erase_handwriting and move_handwriting. To see which word is which, use look_at with label_handwriting.",
         ]
+        if let sheets {
+            // Pages mode: what she adds has to go on the paper.
+            description["paper_sheets"] = sheets.rects(in: visible.insetBy(dx: 0, dy: -visible.height)).map { sheet in
+                ["x": sheet.minX.rounded(), "y": sheet.minY.rounded(), "width": sheet.width.rounded(), "height": sheet.height.rounded()]
+            }
+            description["layout"] = "This notebook is in Pages mode: the page is sheets of paper stacked top to bottom on a desk, and paper_sheets lists the ones around the screen. Ink, notes and pictures must go inside a sheet; notes and pictures put on the desk are moved onto the nearest sheet."
+        }
         return PalJSON.string(description)
     }
 
@@ -924,9 +1258,13 @@ extension NotebookCanvasController: PalPage {
         // Without handwriting to match, a size that reads well on screen.
         let style = PalInkReading.style(of: canvasView.drawing, fallbackHeight: 20 / max(canvasView.zoomScale, 0.05))
         let height = min(max(letterHeight ?? style.letterHeight, 6), 200)
-        let maxWidth = max(min(visible.width * 0.45, height * 40), height * 10)
+        var maxWidth = max(min(visible.width * 0.45, height * 40), height * 10)
+        // Pages mode: no wider than a sheet, less its margins.
+        if sheets != nil { maxWidth = min(maxWidth, NotebookSheets.sheetSize.width - 48) }
         let size = PalInk.measure(text, letterHeight: height, maxWidth: maxWidth)
-        let spot = origin ?? freeSpot(for: CGSize(width: size.width + 8, height: size.height + 8), near: place.near)
+        let area = CGSize(width: size.width + 8, height: size.height + 8)
+        let spot = origin.map { onPaper(CGRect(origin: $0, size: area), inset: 12).origin }
+            ?? freeSpot(for: area, near: place.near)
         let writing = PalInk.handwriting(
             text,
             origin: spot,
@@ -948,6 +1286,25 @@ extension NotebookCanvasController: PalPage {
         guard !strokes.isEmpty else { return "Couldn't draw that mark." }
         PalInkEditing.add(strokes, to: canvasView, actionName: "Mark")
         return nil
+    }
+
+    func palDraw(_ strokes: [String], at origin: CGPoint?, size: CGSize, color: UIColor?, penWidth: CGFloat?, in place: PalPlace) -> (result: String, isError: Bool) {
+        let style = PalInkReading.style(of: canvasView.drawing, fallbackHeight: 20 / max(canvasView.zoomScale, 0.05))
+        let area = CGSize(width: size.width + 8, height: size.height + 8)
+        let spot = origin.map { onPaper(CGRect(origin: $0, size: area), inset: 12).origin }
+            ?? freeSpot(for: area, near: place.near)
+        let sketch = PalInk.sketch(
+            strokes,
+            in: CGRect(origin: spot, size: size),
+            color: color ?? style.color,
+            penWidth: penWidth ?? max(style.penWidth, 2),
+            seed: UInt64.random(in: 1...UInt64.max)
+        )
+        guard !sketch.strokes.isEmpty else {
+            return ("There was nothing to draw. Give each stroke as pen commands (M 10 10 L 50 50) or as x y numbers.", true)
+        }
+        PalInkEditing.add(sketch.strokes, to: canvasView, actionName: "Drawing")
+        return (sketch.summary, false)
     }
 
     func palReadPages(_ pages: ClosedRange<Int>) -> String? { nil }
@@ -1010,7 +1367,15 @@ extension NotebookCanvasController: PalPage {
             let wanted = min(max(width, 32), 4_000)
             size = CGSize(width: wanted, height: size.height * wanted / max(size.width, 1))
         }
-        let frame = CGRect(origin: origin ?? freeSpot(for: size, near: place.near), size: size)
+        if sheets != nil {
+            // Pages mode: no bigger than a sheet, less its margins.
+            let room = CGSize(width: NotebookSheets.sheetSize.width - 24, height: NotebookSheets.sheetSize.height - 24)
+            let scale = min(1, room.width / max(size.width, 1), room.height / max(size.height, 1))
+            size = CGSize(width: size.width * scale, height: size.height * scale)
+        }
+        let spot = origin.map { onPaper(CGRect(origin: $0, size: size), inset: 12).origin }
+            ?? freeSpot(for: size, near: place.near)
+        let frame = CGRect(origin: spot, size: size)
         return (images.add(image, frame: frame), frame)
     }
 
@@ -1018,6 +1383,7 @@ extension NotebookCanvasController: PalPage {
     /// corner: a free spot that covers no ink, text or image.
     /// - With an area circled: as close as it can to just right of it.
     /// - Otherwise: as close as it can to the middle of the screen.
+    /// - In Pages mode, always on one sheet of paper.
     private func freeSpot(for size: CGSize, near: CGRect?) -> CGPoint {
         if near != palPlacedNear {
             palPlacedNear = near
@@ -1030,13 +1396,29 @@ extension NotebookCanvasController: PalPage {
         taken += palPlaced
         let preferred = near.map { CGPoint(x: $0.maxX + 20, y: $0.minY) }
             ?? CGPoint(x: visible.midX - size.width / 2, y: visible.midY - size.height / 2)
-        let spot = PalSpot.find(for: size, preferred: preferred, visible: visible, taken: taken, below: contentBounds()?.maxY ?? preferred.y)
+        var allowed: ((CGRect) -> Bool)?
+        if let sheets {
+            allowed = { sheets.isOnOneSheet($0, inset: 12) }
+        }
+        var spot = PalSpot.find(for: size, preferred: preferred, visible: visible, taken: taken, below: contentBounds()?.maxY ?? preferred.y, allowed: allowed)
+        // With no free spot on the sheets around, the nearest place on paper.
+        spot = onPaper(CGRect(origin: spot, size: size), inset: 12).origin
         palPlaced.append(CGRect(origin: spot, size: size))
         return spot
     }
 
+    /// How big a text box or image is, to keep it on paper as it moves.
+    private func itemSize(_ id: UUID) -> CGSize {
+        if let box = textBoxes.box(id) {
+            return CGSize(width: CGFloat(box.width), height: textBoxes.height(of: id))
+        }
+        return page.images?.first { $0.id == id && !$0.isDeleted }?.frame.size ?? .zero
+    }
+
     func palMoveItem(_ id: UUID, to origin: CGPoint) -> String? {
-        change(id) { kind in
+        // Pages mode: onto the nearest sheet, if it would be off the paper.
+        let origin = onPaper(CGRect(origin: origin, size: itemSize(id))).origin
+        return change(id) { kind in
             switch kind {
             case .text: _ = self.textBoxes.setBoxFrame(id: id, origin: origin)
             case .image: _ = self.images.changeImage(id, origin: origin)

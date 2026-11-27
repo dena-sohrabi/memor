@@ -87,6 +87,27 @@ final class DotGridView: UIView {
         )
     }
 
+    /// Shows the dots only inside `rects` (in the superview's points), as on
+    /// the paper sheets in Pages mode. Call after `update`, since it moves
+    /// this view. Nil shows dots everywhere.
+    func clip(to rects: [CGRect]?) {
+        guard let rects else {
+            layer.mask = nil
+            return
+        }
+        let mask = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+        let path = CGMutablePath()
+        for rect in rects {
+            path.addRect(rect.offsetBy(dx: -frame.minX, dy: -frame.minY))
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = bounds
+        mask.path = path
+        CATransaction.commit()
+        if layer.mask !== mask { layer.mask = mask }
+    }
+
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         DotGrid.fill(in: context, rect: rect, origin: .zero, cell: cell, radius: dotRadius)

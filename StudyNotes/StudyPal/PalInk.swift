@@ -1,12 +1,16 @@
 import PencilKit
 import UIKit
+import os
 
 /// The study pal's pen. She writes on your page in real handwriting (PencilKit
-/// ink, so you can erase it, lasso it and move it like your own) and marks
-/// your work with circles, underlines, arrows and ticks.
+/// ink, so you can erase it, lasso it and move it like your own), marks
+/// your work with circles, underlines, arrows and ticks, and sketches
+/// diagrams and little pictures by hand.
 ///
-/// It's all plain math with nothing shared, so it can be called from
-/// anywhere, and the same `seed` always gives the same strokes.
+/// Her letters are traced from a handwriting font (`PalGlyphTracer`) the
+/// first time they're needed and kept behind a lock; everything else is
+/// plain math with nothing shared. So it can be called from anywhere, and
+/// the same `seed` always gives the same strokes.
 nonisolated enum PalInk {
     /// How a piece of handwriting came out: its strokes, in page points, and the area they cover.
     struct Writing: Sendable {
@@ -23,45 +27,48 @@ nonisolated enum PalInk {
 
     /// Line spacing, in capital-letter heights.
     private static let lineSpacing: CGFloat = 1.55
-    /// How far descenders (g, p, y) reach below the line, in capital-letter heights.
-    private static let descender: CGFloat = 0.32
-    /// The space between two letters, in capital-letter heights.
+    /// The space between two drawn letters, in capital-letter heights.
+    /// (Letters traced from the font keep the font's own spacing.)
     private static let letterGap: CGFloat = 0.16
-    /// The forward lean of the writing: tan(6°).
+    /// The forward lean of the drawn letters: tan(6°). Letters traced from
+    /// the font already lean the way the font does.
     private static let slant: CGFloat = 0.105
 
-    /// Writes `text` by hand, starting with the top-left of its first line at `origin` (page points, y grows down).
-    /// `letterHeight` is the height of a capital letter (x-height ≈ 0.62 of it). Lines wrap at word boundaries within `maxWidth` (nil = no wrapping); "\n" starts a new line. Line spacing ≈ 1.55 × letterHeight.
-    /// `seed` makes the natural wobble repeatable.
+    /// Writes `text` by hand, with the top-left of its ink at `origin` (page points, y grows down): the first line's baseline sits as far below `origin` as its tallest letter reaches.
+    /// `letterHeight` is the height of a capital letter (x-height ≈ 0.6 of it). Lines wrap at word boundaries within `maxWidth` (nil = no wrapping); "\n" starts a new line. Line spacing ≈ 1.55 × letterHeight.
+    /// The letters are traced from a handwriting font when the iPad has one, with drawn letters for anything it lacks; `penWidth` is kept near the font's own line for the size. `seed` makes the natural wobble repeatable.
     static func handwriting(_ text: String, origin: CGPoint, letterHeight: CGFloat, maxWidth: CGFloat?, color: UIColor, penWidth: CGFloat, seed: UInt64 = 1) -> Writing {
         let empty = Writing(strokes: [], bounds: CGRect(origin: origin, size: .zero))
         guard letterHeight > 0, letterHeight.isFinite, !text.isEmpty else { return empty }
-        let lines = layout(text, maxWidth: wrapWidth(maxWidth, letterHeight: letterHeight))
-        let penWidth = max(penWidth, 0.1)
+        let arranged = arrange(text, maxWidth: wrapWidth(maxWidth, letterHeight: letterHeight))
+        let penWidth = fontPen(penWidth, letterHeight: letterHeight)
+        // The pen's edge, not the middle of its line, starts at `origin`.
+        let origin = CGPoint(x: origin.x + penWidth / 2, y: origin.y + penWidth / 2)
         var random = SplitMix64(seed: seed)
         var pen = Pen(color: color, width: penWidth, speed: letterHeight * 8)
         // Points along a stroke sit about half a pen width apart.
         let step = min(max(penWidth * 0.5 / letterHeight, 0.012), 0.05)
 
-        for (row, line) in lines.enumerated() {
-            let baseline = origin.y + (CGFloat(row) * lineSpacing + 1) * letterHeight
+        for (row, line) in arranged.lines.enumerated() {
+            let baseline = origin.y + (arranged.top + CGFloat(row) * lineSpacing) * letterHeight
             // The line drifts gently up and down, like writing without ruled lines.
-            let drift = Wave(&random, amplitude: 0.028 * letterHeight, wavelength: 7 * letterHeight)
+            let drift = Wave(&random, amplitude: 0.02 * letterHeight, wavelength: 7 * letterHeight)
             for letter in line.letters {
                 guard !letter.glyph.strokes.isEmpty else {
                     pen.pause(0.15)
                     continue
                 }
-                // Each letter comes out a little different: size, lean and spacing.
-                let scale = 1 + random.signed() * 0.04
-                let lean = slant + random.signed() * 0.025
-                let shiftX = letter.x + random.signed() * 0.02
-                let shiftY = random.signed() * 0.008
-                let middle = letter.glyph.width / 2
+                // Each letter comes out a little different (size, lean and
+                // spacing), but they all stay on the line.
+                let scale = 1 + random.signed() * 0.025
+                let lean = letter.glyph.slant + random.signed() * 0.012
+                let shiftX = line.offset + letter.x + random.signed() * 0.012
+                let shiftY = random.signed() * 0.005
+                let middle = letter.glyph.middle
                 for path in letter.glyph.strokes {
                     // A slow, tiny wander so lines aren't machine-perfect.
-                    let wanderX = Wave(&random, amplitude: 0.008, wavelength: 0.55)
-                    let wanderY = Wave(&random, amplitude: 0.008, wavelength: 0.8)
+                    let wanderX = Wave(&random, amplitude: 0.006, wavelength: 0.55)
+                    let wanderY = Wave(&random, amplitude: 0.006, wavelength: 0.8)
                     let samples = resample(path, step: step)
                     var points: [CGPoint] = []
                     points.reserveCapacity(samples.count)
@@ -81,25 +88,51 @@ nonisolated enum PalInk {
         return Writing(strokes: pen.strokes, bounds: pen.bounds ?? empty.bounds)
     }
 
-    /// The size handwriting would take, without making strokes (same layout as above).
-    /// It runs from the top of the first line's capitals to the bottom of the last line's descenders.
+    /// The size handwriting would take, without making strokes (the same layout as above, so the two agree).
+    /// It runs from the top of the ink (the first line's tallest letter) to the bottom of the lowest descender, and from the first letter's ink to the end of the longest line, with a pen as thick as the font's own line; the hand's small wobble can add a little.
     static func measure(_ text: String, letterHeight: CGFloat, maxWidth: CGFloat?) -> CGSize {
         guard letterHeight > 0, letterHeight.isFinite, !text.isEmpty else { return .zero }
-        let lines = layout(text, maxWidth: wrapWidth(maxWidth, letterHeight: letterHeight))
-        let widest = lines.map(\.width).max() ?? 0
-        return CGSize(
-            width: widest > 0 ? (widest + slant) * letterHeight : 0,
-            height: (CGFloat(lines.count - 1) * lineSpacing + 1 + descender) * letterHeight
-        )
+        let size = arrange(text, maxWidth: wrapWidth(maxWidth, letterHeight: letterHeight)).size
+        guard size.width > 0 else { return .zero }
+        let pen = (handFont?.thickness ?? 0.1) * letterHeight
+        return CGSize(width: size.width * letterHeight + pen, height: size.height * letterHeight + pen)
     }
 
-    /// The wrapping width in capital-letter heights, leaving room for the lean.
+    /// The wrapping width in capital-letter heights. (Line widths already
+    /// include the lean.)
     private static func wrapWidth(_ maxWidth: CGFloat?, letterHeight: CGFloat) -> CGFloat {
         guard let maxWidth, maxWidth.isFinite else { return .infinity }
-        return max(maxWidth / letterHeight - slant, 0)
+        return max(maxWidth / letterHeight, 0)
+    }
+
+    /// The pen for writing `letterHeight` tall: as thick as asked, but kept
+    /// near the font's own line (from 80% of it to twice it), so the traced
+    /// letters look the way the font draws them.
+    private static func fontPen(_ asked: CGFloat, letterHeight: CGFloat) -> CGFloat {
+        let asked = max(asked, 0.1)
+        guard let handFont else { return asked }
+        let line = handFont.thickness * letterHeight
+        return min(max(asked, line * 0.8), line * 2)
     }
 
     // MARK: Layout
+
+    /// Where some ink lies, in capital-letter heights: x from the start of
+    /// its letter (or line), y up from the baseline.
+    private struct Extent: Sendable {
+        var minX: CGFloat
+        var maxX: CGFloat
+        var minY: CGFloat
+        var maxY: CGFloat
+
+        func union(_ other: Extent) -> Extent {
+            Extent(minX: min(minX, other.minX), maxX: max(maxX, other.maxX), minY: min(minY, other.minY), maxY: max(maxY, other.maxY))
+        }
+
+        func shifted(by dx: CGFloat) -> Extent {
+            Extent(minX: minX + dx, maxX: maxX + dx, minY: minY, maxY: maxY)
+        }
+    }
 
     /// A letter placed on a line, `x` capital-letter heights from the line's start.
     private struct Placed {
@@ -111,14 +144,57 @@ nonisolated enum PalInk {
         var letters: [Placed] = []
         /// Where the next letter would start.
         var cursor: CGFloat = 0
-
-        /// From the line's start to the end of its last letter.
-        var width: CGFloat { letters.isEmpty ? 0 : cursor - PalInk.letterGap }
+        /// How far the line moves sideways so its first letter's ink starts
+        /// right at the left edge.
+        var offset: CGFloat = 0
+        /// Where the line's ink lies (before `offset`), or nil while it has none.
+        var ink: Extent?
 
         mutating func add(_ glyph: Glyph) {
             letters.append(Placed(glyph: glyph, x: cursor))
-            cursor += glyph.width + PalInk.letterGap
+            if let box = glyph.ink?.shifted(by: cursor) {
+                ink = ink?.union(box) ?? box
+            }
+            cursor += glyph.advance
         }
+    }
+
+    /// Text laid out for writing: its lines, where the first baseline sits,
+    /// and the size of its ink, all in capital-letter heights.
+    private struct Arrangement {
+        var lines: [TextLine]
+        /// From the top of the ink down to the first line's baseline.
+        var top: CGFloat
+        var size: CGSize
+    }
+
+    /// Lays the text out (see `layout`) and works out where its ink lies,
+    /// so `handwriting` and `measure` agree.
+    private static func arrange(_ text: String, maxWidth: CGFloat) -> Arrangement {
+        var lines = layout(text, maxWidth: maxWidth)
+        for index in lines.indices {
+            if let first = lines[index].letters.first, let ink = first.glyph.ink {
+                lines[index].offset = -ink.minX
+            }
+        }
+        // The top is the first line's tallest letter (a capital's height when it's empty).
+        let top = lines.first?.ink?.maxY ?? 1
+        var width: CGFloat = 0
+        var height = top
+        for (row, line) in lines.enumerated() {
+            let baseline = top + CGFloat(row) * lineSpacing
+            height = max(height, baseline - min(line.ink?.minY ?? 0, 0))
+            if let ink = line.ink { width = max(width, ink.maxX + line.offset) }
+        }
+        return Arrangement(lines: lines, top: top, size: CGSize(width: width, height: max(height, 0)))
+    }
+
+    /// How far some letters reach: from where the first starts to the end
+    /// of the last one's ink.
+    private static func reach(of glyphs: [Glyph]) -> CGFloat {
+        guard let last = glyphs.last else { return 0 }
+        let before = glyphs.dropLast().reduce(0) { $0 + $1.advance }
+        return before + (last.ink?.maxX ?? last.advance)
     }
 
     /// Splits the text into lines, wrapping between words (and inside a word
@@ -126,6 +202,7 @@ nonisolated enum PalInk {
     /// capital-letter heights.
     private static func layout(_ text: String, maxWidth: CGFloat) -> [TextLine] {
         var lines: [TextLine] = []
+        let space = wordSpace
         for paragraph in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             var line = TextLine()
             var word: [Glyph] = []
@@ -134,18 +211,17 @@ nonisolated enum PalInk {
 
             func placeWord() {
                 guard !word.isEmpty else { return }
-                let wordWidth = word.reduce(0) { $0 + $1.width + letterGap } - letterGap
                 // Spaces at the start of a paragraph indent it; at a wrap they're dropped.
                 let keepSpaces = !line.letters.isEmpty || startOfParagraph
-                let spaceWidth = keepSpaces ? spaces.reduce(0) { $0 + $1.width + letterGap } : 0
-                if !line.letters.isEmpty && line.cursor + spaceWidth + wordWidth > maxWidth {
+                let spaceWidth = keepSpaces ? spaces.reduce(0) { $0 + $1.advance } : 0
+                if !line.letters.isEmpty && line.cursor + spaceWidth + reach(of: word) > maxWidth {
                     lines.append(line)
                     line = TextLine()
                 } else if keepSpaces {
                     for glyph in spaces { line.add(glyph) }
                 }
                 for glyph in word {
-                    if !line.letters.isEmpty && line.cursor + glyph.width > maxWidth {
+                    if !line.letters.isEmpty && line.cursor + reach(of: [glyph]) > maxWidth {
                         lines.append(line)
                         line = TextLine()
                     }
@@ -173,9 +249,16 @@ nonisolated enum PalInk {
         return lines
     }
 
-    /// The letter shapes for one character: from the font, a stand-in (æ → ae),
-    /// an accented letter built from its plain one, or a small gap.
+    /// The letter shapes for one character: a small raised or lowered copy
+    /// (², ₂), traced from the handwriting font, drawn (for what the font
+    /// lacks, like arrows and Greek), a stand-in (æ → ae), an accented
+    /// letter built from its plain one, or a small gap.
     private static func glyphs(for character: Character) -> [Glyph] {
+        if character == " " { return [wordSpace] }
+        if let small = smallForms[character], let plain = glyphs(for: small.plain).first, !plain.strokes.isEmpty {
+            return [shrunk(plain, lift: small.lift)]
+        }
+        if let glyph = tracedGlyph(for: character) { return [glyph] }
         if let glyph = glyphTable[character] { return [glyph] }
         if let standIn = standIns[character] { return standIn.flatMap { glyphs(for: $0) } }
         if let glyph = accented(character) { return [glyph] }
@@ -407,16 +490,23 @@ nonisolated enum PalInk {
         let penWidth = max(penWidth, 0.1)
         var random = SplitMix64(seed: seed)
         let paths = shape(of: kind, around: rect, to: to, penWidth: penWidth, random: &random)
+        let pen = byHand(paths, color: color, penWidth: penWidth, size: max(rect.width, rect.height, 10), random: &random)
+        return pen.strokes
+    }
 
+    /// Inks paths in page points with a hand's slow wander, which fades out
+    /// at each end so lines still meet where they should (an arrowhead its
+    /// tip, a box its corner). `size` sets how far the hand wanders; nil
+    /// goes by each path's own size.
+    private static func byHand(_ paths: [[CGPoint]], color: UIColor, penWidth: CGFloat, size: CGFloat?, random: inout SplitMix64) -> Pen {
         var pen = Pen(color: color, width: penWidth, speed: 650)
-        let size = max(rect.width, rect.height, 10)
         let step = max(penWidth * 0.5, 0.5)
         for path in paths {
-            let wanderX = Wave(&random, amplitude: min(max(size * 0.005, 0.3), 1.2), wavelength: max(size * 0.4, 30))
-            let wanderY = Wave(&random, amplitude: min(max(size * 0.005, 0.3), 1.2), wavelength: max(size * 0.45, 34))
+            let reach = size ?? extent(of: path)
+            let wanderX = Wave(&random, amplitude: min(max(reach * 0.005, 0.3), 1.2), wavelength: max(reach * 0.4, 30))
+            let wanderY = Wave(&random, amplitude: min(max(reach * 0.005, 0.3), 1.2), wavelength: max(reach * 0.45, 34))
             let samples = resample(path, step: step)
             let total = samples.last?.s ?? 0
-            // The wander fades out at the ends, so arrowheads meet their tip.
             let points = samples.map { sample -> CGPoint in
                 let fade = min(1, min(sample.s, total - sample.s) / max(total * 0.12, 1))
                 return CGPoint(x: sample.point.x + wanderX.offset(at: sample.s) * fade,
@@ -425,7 +515,149 @@ nonisolated enum PalInk {
             pen.draw(points)
             pen.pause(0.15)
         }
-        return pen.strokes
+        return pen
+    }
+
+    /// The longer side of the area a path covers, at least 10 points.
+    private static func extent(of path: [CGPoint]) -> CGFloat {
+        guard let first = path.first else { return 10 }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for point in path {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        return max(maxX - minX, maxY - minY, 10)
+    }
+
+    // MARK: Drawing
+
+    /// A sketch drawn by hand: its strokes in page points, the area they
+    /// cover, and where the drawing's own coordinates landed on the page.
+    struct Sketch: Sendable {
+        let strokes: [PKStroke]
+        let bounds: CGRect
+        /// Where the drawing's (0, 0) is on the page.
+        let origin: CGPoint
+        /// How many page points one of the drawing's units is.
+        let scale: CGFloat
+        /// It ran out of its box, so it was shrunk to fit.
+        let wasShrunk: Bool
+
+        /// Where it went, and how to find a spot of the drawing on the page
+        /// (to label it), for her.
+        var summary: String {
+            func number(_ value: CGFloat) -> String { String(format: "%.1f", Double(value)) }
+            var text = "Drew it at x \(Int(bounds.minX.rounded())), y \(Int(bounds.minY.rounded())), width \(Int(bounds.width.rounded())), height \(Int(bounds.height.rounded()))."
+            if wasShrunk { text += " It ran outside the box, so it was shrunk to fit." }
+            text += " A point (u, v) of the drawing is at x = \(number(origin.x)) + \(number(scale)) × u, y = \(number(origin.y)) + \(number(scale)) × v on the page."
+            return text
+        }
+    }
+
+    /// Sketches by hand inside `box` (page points): a diagram, a graph, a simple picture.
+    /// Each of `strokes` is one pen line in the box's own coordinates, where the box's longer side runs 0–100 and the other in proportion (a 300 × 150 box runs x 0–100, y 0–50), with y growing down. A stroke is pen commands (`M x y` moves the pen, `L x y` draws a line, `H x` and `V y` straight across or down to there, `Q cx cy x y` and `C c1x c1y c2x c2y x y` curves, `A cx cy rx ry start sweep` part of an ellipse in degrees with 0 at the right and 90 at the bottom, `Z` back to the start), or plain numbers `x y x y …` for a smooth freehand line through those points.
+    /// A drawing that runs well outside its box is shrunk to fit it, keeping its shape. The pen wobbles like a hand, as in `mark`.
+    static func sketch(_ strokes: [String], in box: CGRect, color: UIColor, penWidth: CGFloat, seed: UInt64 = 1) -> Sketch {
+        let box = box.standardized
+        let nothing = Sketch(strokes: [], bounds: CGRect(origin: box.origin, size: .zero), origin: box.origin, scale: 1, wasShrunk: false)
+        guard box.minX.isFinite, box.minY.isFinite, box.width.isFinite, box.height.isFinite, box.width > 0, box.height > 0 else { return nothing }
+        let paths = strokes.flatMap { sketchPaths($0) }.filter { !$0.isEmpty }
+        guard !paths.isEmpty else { return nothing }
+
+        var minX = CGFloat.infinity, minY = CGFloat.infinity
+        var maxX = -CGFloat.infinity, maxY = -CGFloat.infinity
+        for point in paths.joined() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+        guard minX.isFinite, minY.isFinite, maxX.isFinite, maxY.isFinite else { return nothing }
+        var scale = max(box.width, box.height) / 100
+        var origin = box.origin
+        // Well outside the box: shrink it to fit (never grow it), in the middle.
+        let slack = max(box.width, box.height) * 0.05
+        let left = origin.x + minX * scale, right = origin.x + maxX * scale
+        let upper = origin.y + minY * scale, lower = origin.y + maxY * scale
+        let outside = left < box.minX - slack || right > box.maxX + slack || upper < box.minY - slack || lower > box.maxY + slack
+        if outside {
+            let fit = min(box.width / max(right - left, 0.001), box.height / max(lower - upper, 0.001), 1)
+            scale *= fit
+            origin = CGPoint(x: box.midX - (minX + maxX) / 2 * scale, y: box.midY - (minY + maxY) / 2 * scale)
+        }
+        let placed = paths.map { path in
+            path.map { CGPoint(x: origin.x + $0.x * scale, y: origin.y + $0.y * scale) }
+        }
+        var random = SplitMix64(seed: seed)
+        let pen = byHand(placed, color: color, penWidth: max(penWidth, 0.1), size: nil, random: &random)
+        return Sketch(strokes: pen.strokes, bounds: pen.bounds ?? nothing.bounds, origin: origin, scale: scale, wasShrunk: outside)
+    }
+
+    /// One sketch stroke's pen lines, in the drawing's own units.
+    private static func sketchPaths(_ text: String) -> [[CGPoint]] {
+        // Commands and numbers however they're spaced: "M10,20L30 40" → M 10 20 L 30 40.
+        var spaced = ""
+        var previous: Character = " "
+        for character in text {
+            if character.isLetter {
+                spaced += " \(character.uppercased()) "
+            } else if character == "," || character.isWhitespace {
+                spaced += " "
+            } else if character == "-" && (previous.isNumber || previous == ".") {
+                spaced += " -"
+            } else {
+                spaced.append(character)
+            }
+            previous = character
+        }
+        let tokens = spaced.split(separator: " ")
+        guard let first = tokens.first else { return [] }
+        guard isNumber(first) else { return parsePath(tokens[...], spacing: 1, repeatsCommands: true) }
+        // Plain numbers: a smooth line through the points.
+        let values = tokens.compactMap { Double($0) }.filter(\.isFinite).map { CGFloat($0) }
+        var points: [CGPoint] = []
+        var index = 0
+        while index + 1 < values.count {
+            points.append(CGPoint(x: values[index], y: values[index + 1]))
+            index += 2
+        }
+        return points.isEmpty ? [] : [smoothLine(through: points, spacing: 1)]
+    }
+
+    /// A token that starts a number, like "12", "-.5" or "+3".
+    private static func isNumber(_ token: Substring) -> Bool {
+        guard let first = token.first else { return false }
+        return first.isNumber || first == "-" || first == "+" || first == "."
+    }
+
+    /// A smooth line through the points (Catmull–Rom), going all the way
+    /// round when it ends where it began.
+    private static func smoothLine(through points: [CGPoint], spacing: CGFloat) -> [CGPoint] {
+        guard points.count > 2, let first = points.first, let last = points.last else { return points }
+        let closed = points.count > 3 && distance(first, last) < spacing * 0.5
+        let knots = closed ? Array(points.dropLast()) : points
+        let count = knots.count
+        func knot(_ index: Int) -> CGPoint {
+            closed ? knots[(index % count + count) % count] : knots[min(max(index, 0), count - 1)]
+        }
+        func blend(_ a: CGFloat, _ b: CGFloat, _ c: CGFloat, _ d: CGFloat, _ t: CGFloat) -> CGFloat {
+            let linear = c - a
+            let square = 2 * a - 5 * b + 4 * c - d
+            let cube = 3 * (b - c) + d - a
+            return 0.5 * (2 * b + linear * t + square * t * t + cube * t * t * t)
+        }
+        var line = [knots[0]]
+        for index in 0..<(closed ? count : count - 1) {
+            let a = knot(index - 1), b = knot(index), c = knot(index + 1), d = knot(index + 2)
+            let steps = max(2, Int((distance(b, c) / spacing).rounded(.up)))
+            for step in 1...steps {
+                let t = CGFloat(step) / CGFloat(steps)
+                line.append(CGPoint(x: blend(a.x, b.x, c.x, d.x, t), y: blend(a.y, b.y, c.y, d.y, t)))
+            }
+        }
+        return line
     }
 
     /// The mark's strokes in page points, before the hand's wander.
@@ -597,25 +829,101 @@ nonisolated enum PalInk {
         return CGPoint(x: center.x + dx * t, y: center.y + dy * t)
     }
 
-    // MARK: The font
+    // MARK: The letters
 
-    /// One character's shape: its width and its strokes, in capital-letter
-    /// heights, with the baseline at y = 0 and y pointing up.
+    /// One character's shape, in capital-letter heights, with the baseline
+    /// at y = 0 and y pointing up.
     private struct Glyph: Sendable {
-        var width: CGFloat
-        var strokes: [[CGPoint]]
+        /// How far on the next letter starts (its width and the space after it).
+        let advance: CGFloat
+        /// How much it leans forward as it's written (tan of the angle).
+        let slant: CGFloat
+        /// Its pen strokes, in the order they're written.
+        let strokes: [[CGPoint]]
+        /// Where its ink lies, leaning as written. Nil for a space.
+        let ink: Extent?
+        /// The middle of its ink, side to side, before the lean.
+        let middle: CGFloat
+
+        init(advance: CGFloat, slant: CGFloat, strokes: [[CGPoint]]) {
+            self.advance = advance
+            self.slant = slant
+            self.strokes = strokes
+            var box: Extent?
+            var left = CGFloat.infinity, right = -CGFloat.infinity
+            for point in strokes.joined() {
+                let x = point.x + point.y * slant
+                let here = Extent(minX: x, maxX: x, minY: point.y, maxY: point.y)
+                box = box?.union(here) ?? here
+                left = min(left, point.x)
+                right = max(right, point.x)
+            }
+            ink = box
+            middle = left <= right ? (left + right) / 2 : advance / 2
+        }
     }
 
-    private static let space = Glyph(width: 0.2, strokes: [])
-    /// What a character the font doesn't know becomes: a small gap.
-    private static let gap = Glyph(width: 0.3, strokes: [])
+    /// The handwriting font her letters are traced from: Bradley Hand, which
+    /// looks like quick, tidy handwriting with a felt-tip pen, or else
+    /// Noteworthy. Both come with iPadOS; with neither, she writes with the
+    /// drawn letters below.
+    private struct HandFont: Sendable {
+        let font: PalGlyphTracer.Font
+        /// How thick its line is, in capital-letter heights.
+        let thickness: CGFloat
+        /// The space between words, in capital-letter heights.
+        let space: CGFloat
+    }
+
+    private static let handFont: HandFont? = {
+        guard let font = PalGlyphTracer.font(named: ["BradleyHandITCTT-Bold", "Noteworthy-Light"]) else { return nil }
+        // Its line, from a few plain letters.
+        let samples: [Character] = ["n", "o", "l", "e", "H"]
+        let widths = samples.compactMap { PalGlyphTracer.trace($0, in: font)?.thickness }.sorted()
+        guard !widths.isEmpty else { return nil }
+        return HandFont(
+            font: font,
+            thickness: min(max(widths[widths.count / 2], 0.04), 0.25),
+            space: PalGlyphTracer.advance(of: " ", in: font) ?? 0.3
+        )
+    }()
+
+    /// Letters already traced, shared by every writer (nil: the font doesn't
+    /// have it, or it didn't trace well).
+    private static let tracedLetters = OSAllocatedUnfairLock<[Character: Glyph?]>(initialState: [:])
+
+    /// A character's shape traced from the handwriting font, the first time
+    /// it's needed. Nil when there's no font or it doesn't have the character.
+    private static func tracedGlyph(for character: Character) -> Glyph? {
+        guard let handFont else { return nil }
+        if let known = tracedLetters.withLock({ $0[character] }) { return known }
+        let glyph = PalGlyphTracer.trace(character, in: handFont.font).map { letter in
+            Glyph(advance: letter.advance, slant: 0, strokes: letter.strokes)
+        }
+        tracedLetters.withLock { $0[character] = .some(glyph) }
+        return glyph
+    }
+
+    /// The space between words: the font's own, a touch wider (writing by
+    /// hand spreads out), or the drawn letters' one.
+    private static let wordSpace = Glyph(
+        advance: handFont.map { max($0.space, 0.25) * 1.15 } ?? (0.2 + letterGap),
+        slant: 0,
+        strokes: []
+    )
+    /// The drawn letters' space.
+    private static let space = Glyph(advance: 0.2 + letterGap, slant: slant, strokes: [])
+    /// What a character no font knows becomes: a small gap.
+    private static let gap = Glyph(advance: 0.3 + letterGap, slant: slant, strokes: [])
     /// How finely curves are cut into straight bits, in capital-letter heights.
     private static let flatness: CGFloat = 0.025
 
-    /// Every character's shape, read from `glyphSource` once.
+    /// Every drawn character's shape, read from `glyphSource` once.
     private static let glyphTable: [Character: Glyph] = makeGlyphTable()
 
-    /// The handwriting font: neat, slightly rounded print, one pen line per stroke.
+    /// The drawn letters: neat, slightly rounded print, one pen line per
+    /// stroke, for what the handwriting font lacks (arrows, Greek, math
+    /// signs) or when there's no such font.
     ///
     /// Each line is a character, its width, then its strokes in the order a
     /// person writes them. Units are capital-letter heights: the baseline is
@@ -794,45 +1102,53 @@ nonisolated enum PalInk {
         "\u{2714}": "\u{2713}", "\u{2718}": "\u{2717}", "\u{2716}": "\u{00D7}",
     ]
 
-    /// Reads `glyphSource`, then adds small raised and lowered copies of the
-    /// digits and a few signs (x², H₂O).
+    /// Reads `glyphSource` into the drawn letters.
     private static func makeGlyphTable() -> [Character: Glyph] {
         var table: [Character: Glyph] = [" ": space]
         for line in glyphSource.split(whereSeparator: \.isNewline) {
             guard let key = line.first, !key.isWhitespace else { continue }
             let tokens = line.dropFirst().split(separator: " ")
             guard let width = tokens.first else { continue }
-            table[key] = Glyph(width: number(width), strokes: parsePath(tokens.dropFirst()))
+            table[key] = Glyph(advance: number(width) + letterGap, slant: slant, strokes: parsePath(tokens.dropFirst()))
         }
+        return table
+    }
 
+    /// Small raised and lowered copies of the digits and a few signs (x²,
+    /// H₂O): which character each is a copy of, and how far it's lifted.
+    private static let smallForms: [Character: (plain: Character, lift: CGFloat)] = {
         let raised: [UInt32] = [0x2070, 0x00B9, 0x00B2, 0x00B3, 0x2074, 0x2075, 0x2076, 0x2077, 0x2078, 0x2079]
         var small: [(up: UInt32, down: UInt32, plain: Character)] = (0...9).map { digit in
             (up: raised[digit], down: 0x2080 + UInt32(digit), plain: Character(String(digit)))
         }
         small += [(0x207A, 0x208A, "+"), (0x207B, 0x208B, "-"), (0x207C, 0x208C, "="), (0x207D, 0x208D, "("),
                   (0x207E, 0x208E, ")"), (0x207F, 0x2099, "n"), (0x2071, 0x1D62, "i"), (0x02E3, 0x2093, "x")]
+        var forms: [Character: (plain: Character, lift: CGFloat)] = [:]
         for entry in small {
-            guard let glyph = table[entry.plain] else { continue }
-            if let up = Unicode.Scalar(entry.up) { table[Character(up)] = shrunk(glyph, lift: 0.44) }
-            if let down = Unicode.Scalar(entry.down) { table[Character(down)] = shrunk(glyph, lift: -0.16) }
+            if let up = Unicode.Scalar(entry.up) { forms[Character(up)] = (plain: entry.plain, lift: 0.44) }
+            if let down = Unicode.Scalar(entry.down) { forms[Character(down)] = (plain: entry.plain, lift: -0.16) }
         }
-        return table
-    }
+        return forms
+    }()
 
     private static func shrunk(_ glyph: Glyph, lift: CGFloat) -> Glyph {
         let scale: CGFloat = 0.58
-        return Glyph(width: glyph.width * scale, strokes: glyph.strokes.map { stroke in
+        return Glyph(advance: glyph.advance * scale, slant: glyph.slant, strokes: glyph.strokes.map { stroke in
             stroke.map { CGPoint(x: $0.x * scale, y: $0.y * scale + lift) }
         })
     }
 
-    /// Turns one glyph's path commands into strokes, with curves cut into
-    /// short straight bits.
-    private static func parsePath(_ tokens: ArraySlice<Substring>) -> [[CGPoint]] {
+    /// Turns path commands into strokes, with curves cut into straight bits
+    /// `spacing` long. With `repeatsCommands`, more numbers after a command
+    /// repeat it (after `M`, as lines), as in SVG; `H x` and `V y` draw
+    /// straight across or down to there, and `Z` goes back to the start.
+    private static func parsePath(_ tokens: ArraySlice<Substring>, spacing: CGFloat = flatness, repeatsCommands: Bool = false) -> [[CGPoint]] {
         let tokens = Array(tokens)
+        let repeatable: Set<Substring> = ["M", "L", "H", "V", "Q", "C", "A"]
         var index = 0
         var strokes: [[CGPoint]] = []
         var current: [CGPoint] = []
+        var last: Substring = ""
 
         func value() -> CGFloat {
             defer { index += 1 }
@@ -849,35 +1165,52 @@ nonisolated enum PalInk {
         }
 
         while index < tokens.count {
-            let command = tokens[index]
-            index += 1
+            var command = tokens[index]
+            if repeatsCommands && isNumber(command) {
+                guard repeatable.contains(last) else {
+                    index += 1
+                    continue
+                }
+                command = last == "M" ? "L" : last
+            } else {
+                index += 1
+            }
             switch command {
             case "M":
                 lift()
                 current.append(point())
             case "L":
                 current.append(point())
+            case "H":
+                let x = value()
+                current.append(CGPoint(x: x, y: current.last?.y ?? 0))
+            case "V":
+                let y = value()
+                current.append(CGPoint(x: current.last?.x ?? 0, y: y))
             case "Q":
                 let control = point()
                 let end = point()
-                current += quadratic(current.last ?? control, control, end, spacing: flatness)
+                current += quadratic(current.last ?? control, control, end, spacing: spacing)
             case "C":
                 let first = point()
                 let second = point()
                 let end = point()
-                current += cubic(current.last ?? first, first, second, end, spacing: flatness)
+                current += cubic(current.last ?? first, first, second, end, spacing: spacing)
             case "A":
                 let center = point()
                 let radiusX = value()
                 let radiusY = value()
                 let start = value()
                 let sweep = value()
-                current += ellipse(center: center, radii: CGSize(width: radiusX, height: radiusY), from: start, sweep: sweep, spacing: flatness)
+                current += ellipse(center: center, radii: CGSize(width: radiusX, height: radiusY), from: start, sweep: sweep, spacing: spacing)
+            case "Z":
+                if let start = current.first, current.count > 1 { current.append(start) }
             case "|":
                 lift()
             default:
                 break
             }
+            last = command
         }
         lift()
         return strokes
@@ -917,16 +1250,17 @@ nonisolated enum PalInk {
         var base = Character(scalars[0])
         // An accent replaces the dot on i and j.
         if base == "i" { base = "\u{0131}" } else if base == "j" { base = "\u{0237}" }
-        guard var glyph = glyphTable[base] else { return nil }
-        let tall = base.isUppercase || "bdfhklt".contains(base)
-        let middle = glyph.width / 2
-        var height: CGFloat = (tall ? 1 : 0.62) + 0.1
+        guard let plain = glyphs(for: base).first, !plain.strokes.isEmpty else { return nil }
+        // Accents sit over the middle of the letter, just above its top.
+        let points = plain.strokes.joined()
+        var height = (points.map(\.y).max() ?? 0.62) + 0.1
+        var strokes = plain.strokes
         for mark in scalars.dropFirst() {
-            let (strokes, used) = accent(mark.value, middle: middle, height: height)
-            glyph.strokes += strokes
+            let (marks, used) = accent(mark.value, middle: plain.middle, height: height)
+            strokes += marks
             height += used
         }
-        return glyph
+        return Glyph(advance: plain.advance, slant: plain.slant, strokes: strokes)
     }
 
     /// One accent's strokes, centered on `middle` and sitting at `height`

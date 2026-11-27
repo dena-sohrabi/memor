@@ -318,6 +318,10 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
         var container: @MainActor (TextBox) -> UIView?
         var contentChanged: @MainActor () -> Void
         var editingEnded: @MainActor () -> Void
+        /// Where a box made or dragged at a frame (in its container's
+        /// points) ends up instead: on a paper sheet, in a notebook in Pages
+        /// mode. Nil leaves boxes where they're put.
+        var keepOnPaper: (@MainActor (CGRect) -> CGRect)? = nil
     }
 
     private let modelContext: ModelContext
@@ -381,6 +385,7 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
 
     func createBox(at origin: CGPoint, width: CGFloat, pageIndex: Int? = nil, initialText: String? = nil) {
         clearSelection()
+        let origin = placedOrigin(origin, width: width)
         let box = TextBox(x: origin.x, y: origin.y, width: width, pageIndex: pageIndex)
         modelContext.insert(box)
         hooks.attach(box)
@@ -404,6 +409,7 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
         font: UIFont = TextBoxView.defaultFont,
         color: UIColor = .black
     ) -> UUID? {
+        let origin = placedOrigin(origin, width: width)
         let box = TextBox(x: origin.x, y: origin.y, width: width, pageIndex: pageIndex)
         let attributed = NSAttributedString(string: text, attributes: [
             .font: font,
@@ -423,6 +429,12 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
         }
         hooks.contentChanged()
         return id
+    }
+
+    /// Where a new box `width` wide goes when it's asked for at `origin`.
+    private func placedOrigin(_ origin: CGPoint, width: CGFloat) -> CGPoint {
+        guard let keepOnPaper = hooks.keepOnPaper else { return origin }
+        return keepOnPaper(CGRect(origin: origin, size: CGSize(width: width, height: 44))).origin
     }
 
     /// The model for a box, whether or not its view is on screen.
@@ -573,6 +585,15 @@ final class TextBoxCoordinator: TextBoxViewDelegate {
 
     func textBoxView(_ boxView: TextBoxView, didMoveFrom oldFrame: CGRect) {
         registerFrameUndo(id: boxView.boxID, frame: oldFrame)
+        // Dragged off the paper: it slides back onto the sheet.
+        if let keepOnPaper = hooks.keepOnPaper {
+            let kept = keepOnPaper(boxView.frame)
+            if kept.origin != boxView.frame.origin || kept.width != boxView.frame.width {
+                UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) {
+                    boxView.apply(origin: kept.origin, width: kept.width)
+                }
+            }
+        }
         hooks.contentChanged()
     }
 

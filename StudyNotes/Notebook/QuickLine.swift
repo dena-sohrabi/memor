@@ -62,6 +62,8 @@ final class QuickLine: NSObject {
     private var holdTask: Task<Void, Never>?
     /// Set when a held stroke ends: straighten it once it lands in the drawing.
     private var pendingStrokeCount: Int?
+    /// True while the hand-drawn stroke is being swapped for the straight one.
+    private(set) var isStraightening = false
 
     init(canvasView: PKCanvasView, previewHost: UIView) {
         self.canvasView = canvasView
@@ -199,11 +201,14 @@ final class QuickLine: NSObject {
             )
         }
         let path = PKStrokePath(controlPoints: straightPoints, creationDate: stroke.path.creationDate)
-        let straight = PKStroke(ink: stroke.ink, path: path, transform: stroke.transform, mask: nil)
+        // Keeps the stroke's mask: in Pages mode, the edge of its sheet.
+        let straight = PKStroke(ink: stroke.ink, path: path, transform: stroke.transform, mask: stroke.mask)
 
         let before = drawing.dataRepresentation()
         drawing.strokes[drawing.strokes.count - 1] = straight
+        isStraightening = true
         canvasView.drawing = drawing
+        isStraightening = false
         canvasView.undoManager?.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.setDrawing(before) }
         }

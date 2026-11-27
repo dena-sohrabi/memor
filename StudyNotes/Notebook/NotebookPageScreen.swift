@@ -70,6 +70,8 @@ struct NotebookPageScreen: View {
     @State private var pageID: UUID
     @State private var photoItem: PhotosPickerItem?
     @State private var showsKeySettings = false
+    /// Infinite canvas or sheets of paper, from Settings.
+    @AppStorage(NotebookLayout.settingKey) private var layout: NotebookLayout = .infinite
     private var pal: Pal { .shared }
 
     init(notebook: Notebook, page: NotebookPage) {
@@ -82,8 +84,10 @@ struct NotebookPageScreen: View {
         let index = pages.firstIndex { $0.id == pageID }
         Group {
             if let index {
-                NotebookCanvasRepresentable(page: pages[index], editor: editor, modelContext: modelContext)
-                    .id(pages[index].id)
+                // A new canvas for another page, or when Settings switches
+                // between the infinite canvas and sheets of paper.
+                NotebookCanvasRepresentable(page: pages[index], editor: editor, modelContext: modelContext, layout: layout)
+                    .id("\(pages[index].id.uuidString) \(layout.rawValue)")
             } else {
                 Color(uiColor: Paper.color)
             }
@@ -175,13 +179,15 @@ private struct NotebookCanvasRepresentable: UIViewControllerRepresentable {
     let page: NotebookPage
     let editor: NotebookEditor
     let modelContext: ModelContext
+    let layout: NotebookLayout
 
     func makeUIViewController(context: Context) -> NotebookCanvasController {
         let controller = NotebookCanvasController(
             page: page,
             modelContext: modelContext,
             toolPicker: editor.toolPicker,
-            isTextMode: editor.isTextMode
+            isTextMode: editor.isTextMode,
+            layout: layout
         )
         controller.onTextModeEnded = { [weak editor] in editor?.isTextMode = false }
         controller.showsToolPicker = !editor.hidesChrome

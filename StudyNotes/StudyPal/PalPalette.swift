@@ -1,3 +1,4 @@
+import GameController
 import SwiftUI
 
 /// The study pal's chat card (Chat mode only): your talk with her, what you
@@ -40,11 +41,16 @@ struct PalPalette: View {
             if typing, pal.listener.isListening { pal.cancelRecording() }
         }
         .task {
-            // Opens ready for the next message. Focus set the moment it
-            // appears, mid-transition, is often dropped.
+            // With a keyboard attached, it opens ready for the next message.
+            // Without one, the page keeps the focus: taking it hid the pen
+            // palette and turned the Pencil's squeeze into the text bar.
+            // Focus set the moment it appears, mid-transition, is often dropped.
             try? await Task.sleep(for: .milliseconds(150))
-            if !pal.listener.isListening { isTyping = true }
+            if !pal.listener.isListening, PalKeyboard.isAttached { isTyping = true }
         }
+        // Her card closed: the page gets the focus back (it only takes it
+        // when nothing on it is being typed in).
+        .onDisappear { PageFocus.returnToPage() }
     }
 
     // MARK: Header
@@ -304,7 +310,20 @@ struct PalPalette: View {
         guard canSend else { return }
         pal.send(draft)
         draft = ""
+        // Without a keyboard, the on-screen one goes away and the page gets
+        // the Pencil back while she answers.
+        if !PalKeyboard.isAttached {
+            isTyping = false
+            PageFocus.returnToPage()
+        }
     }
+}
+
+/// Whether a hardware keyboard is attached, so typing to her right away
+/// makes sense.
+@MainActor
+enum PalKeyboard {
+    static var isAttached: Bool { GCKeyboard.coalesced != nil }
 }
 
 /// One message in her card: yours on the right, hers on the left.
@@ -537,6 +556,11 @@ struct PalComposeBar: View {
         guard canSend else { return }
         pal.send(draft)
         draft = ""
+        isFocused = false
         pal.openPalette()
+        // The compose box goes away as her card opens: the page takes the
+        // focus back, or nothing would have it and the pen palette would
+        // stay hidden. (With a keyboard, her card's field takes it instead.)
+        if !PalKeyboard.isAttached { PageFocus.returnToPage() }
     }
 }

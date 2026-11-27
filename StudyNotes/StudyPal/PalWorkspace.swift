@@ -109,6 +109,12 @@ protocol PalPage: AnyObject {
     func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, bold: Bool, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool)
     /// Draws a mark (a circle, underline, arrow…) on the page.
     func palMark(_ mark: PalInk.Mark, around rect: CGRect, to: CGPoint?, color: UIColor?, in place: PalPlace) -> String?
+    /// Sketches by hand in a box of `size`, with its top-left at `origin`
+    /// (or in free space beside `place.near`, or in view): each stroke in
+    /// the box's own coordinates (see `PalInk.sketch`), in `color` (or
+    /// their pen's) and `penWidth` (or as thick as theirs). Returns what
+    /// happened, for her.
+    func palDraw(_ strokes: [String], at origin: CGPoint?, size: CGSize, color: UIColor?, penWidth: CGFloat?, in place: PalPlace) -> (result: String, isError: Bool)
     func palMoveItem(_ id: UUID, to origin: CGPoint) -> String?
     func palResizeItem(_ id: UUID, width: CGFloat) -> String?
     func palEditText(_ id: UUID, text: String) -> String?

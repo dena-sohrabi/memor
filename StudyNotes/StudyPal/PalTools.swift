@@ -125,6 +125,16 @@ enum PalTools {
                       "to_x": ["type": ["number", "null"], "description": "Where an arrow points, in page points. Null otherwise."],
                       "to_y": ["type": ["number", "null"]],
                       "color": color]),
+            function("draw",
+                     "Draw by hand on the page, in ink: a diagram, a graph, a sketch or a simple picture (a cell, a circuit, a triangle with its angles, boxes joined by arrows, a little plant). Give a box on the page to draw in, and the strokes inside it in the box's own coordinates: its longer side runs from 0 to 100 and the other side in proportion (a box 300 wide and 150 tall runs x 0–100, y 0–50), with y growing down. Each stroke is one pen line, as pen commands: M x y moves the pen, L x y draws a straight line, H x and V y go straight across or down to there, Q cx cy x y and C c1x c1y c2x c2y x y draw curves, A cx cy rx ry start sweep draws part of an ellipse (in degrees, 0 at the right and 90 at the bottom; on its own, A cx cy rx ry 0 360 is a whole ellipse), Z closes the shape. Or give just numbers, x y x y …, for a smooth freehand line through those points. Keep it simple and clear, like a good student's sketch. Then label it with write_by_hand (the result says where the drawing's points are on the page), and look_at it to check.",
+                     ["page": page, "pdf_page": pdfPage,
+                      "x": ["type": ["number", "null"], "description": "Left edge of the box, in page points. Null to let Memor find a free spot beside what they circled, or in view."],
+                      "y": ["type": ["number", "null"], "description": "Top edge of the box, in page points. Null together with x."],
+                      "width": ["type": "number", "description": "Width of the box, in page points."],
+                      "height": ["type": "number", "description": "Height of the box, in page points."],
+                      "strokes": ["type": "array", "items": ["type": "string"], "description": "The pen lines, in the order you'd draw them, like \"M 10 40 L 90 40\", \"A 50 25 20 20 0 360\" or \"10 30 30 10 50 30 70 10\"."],
+                      "pen_width": ["type": ["number", "null"], "description": "How thick the pen is, in page points. Null to match their pen."],
+                      "color": color]),
             function("move_item",
                      "Move a typed note or picture so its top-left corner is at (x, y), in page points.",
                      ["page": page, "id": id, "x": number, "y": number]),
@@ -252,6 +262,7 @@ enum PalTools {
         case "write_by_hand": PalActivity(text: "Writing on your page…", symbol: "pencil.and.scribble")
         case "add_note": PalActivity(text: "Adding a note…", symbol: "note.text")
         case "mark": PalActivity(text: "Marking your page…", symbol: "scribble")
+        case "draw": PalActivity(text: "Drawing on your page…", symbol: "pencil.and.outline")
         case "move_item", "resize_item": PalActivity(text: "Moving things around…", symbol: "arrow.up.and.down.and.arrow.left.and.right")
         case "edit_text": PalActivity(text: "Editing a note…", symbol: "pencil")
         case "recolor": PalActivity(text: "Changing the color…", symbol: "paintpalette")
@@ -381,6 +392,17 @@ enum PalTools {
             let rect = CGRect(x: x, y: y, width: max(width, 1), height: max(height, 1))
             let problem = page.palMark(kind, around: rect, to: point(input["to_x"], input["to_y"]), color: PalColor.parse(string(input["color"])), in: place)
             return problem.map { Outcome.text($0, isError: true) } ?? Outcome.text("Marked it.", changedPage: true)
+
+        case "draw":
+            let strokes = (input["strokes"] as? [Any] ?? []).compactMap { string($0) }.filter { !$0.isEmpty }
+            guard !strokes.isEmpty else { return .text("`strokes` must list at least one pen line.", isError: true) }
+            guard let width = number(input["width"]), let height = number(input["height"]), width > 0, height > 0 else {
+                return .text("width and height must give the size of the box to draw in, in page points.", isError: true)
+            }
+            let size = CGSize(width: min(width, 2_000), height: min(height, 2_000))
+            let penWidth = number(input["pen_width"]).map { CGFloat(min(max($0, 0.5), 20)) }
+            let drawn = page.palDraw(strokes, at: point(input["x"], input["y"]), size: size, color: PalColor.parse(string(input["color"])), penWidth: penWidth, in: place)
+            return .text(drawn.result, isError: drawn.isError, changedPage: !drawn.isError)
 
         case "move_item":
             guard let id = itemID(input), let origin = point(input["x"], input["y"]) else {

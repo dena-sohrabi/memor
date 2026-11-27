@@ -6,6 +6,7 @@ import SwiftUI
 ///   need an OpenAI key either way.
 /// - Her name, her memory, reading replies aloud, her voice, her sounds,
 ///   and staying on screen outside Memor.
+/// - Notebooks: an infinite canvas on every page, or sheets of paper.
 /// - Usage: what her AI requests used and cost, and a calculator.
 /// - About: what leaves your iPad, and the version.
 ///
@@ -20,6 +21,7 @@ struct SettingsView: View {
     @AppStorage(PalMemoryStore.isOnKey) private var remembers = true
     @AppStorage(PalBrainModel.settingKey) private var brainModel = ""
     @AppStorage(PalWakeListener.isEnabledKey) private var wakeWord = true
+    @AppStorage(NotebookLayout.settingKey) private var notebookLayout: NotebookLayout = .infinite
     @State private var hasClaudeKey = APIKeyStore.hasKey
     @State private var hasOpenAIKey = OpenAIKeyStore.hasKey
     /// Opened for a key: once it's saved, Settings closes.
@@ -120,6 +122,20 @@ struct SettingsView: View {
                 }
             } footer: {
                 Text("Say “Hey \(palName.isEmpty ? "Study Pal" : palName)” and what you want, and she answers when you pause; she listens for her name on this iPad only (the microphone dot shows while she does), and never while she's talking or hidden. Or use the mic beside her: hold it while you talk and let go, or tap it, talk and tap again. The switch beside her picks Voice (she talks back and listens for her name) or Chat (she only writes).")
+            }
+
+            Section {
+                Picker(selection: $notebookLayout) {
+                    ForEach(NotebookLayout.allCases) { layout in
+                        Text(layout.title).tag(layout)
+                    }
+                } label: {
+                    SettingsLabel("Page Style", systemImage: "doc.on.doc.fill", color: .brown)
+                }
+            } header: {
+                Text("Notebooks")
+            } footer: {
+                Text("Infinite Canvas gives every page endless dotted paper to scroll around. Pages gives it sheets of paper stacked top to bottom, like a real notebook: you scroll down through them, ink stays on them, and a new sheet appears as you start on the last one. Your notes stay where they are either way.")
             }
 
             Section {

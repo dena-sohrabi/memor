@@ -34,6 +34,7 @@ final class PDFReaderController: UIViewController {
     private let saveDebouncer = Debouncer()
     private let positionDebouncer = Debouncer()
     private var eraserReturn: EraserAutoReturn?
+    private var pencilFocus: PencilFocusKeeper?
     private var undoTaps: UndoTapGestures?
     /// This open PDF, for the study pal.
     let palPageID = UUID()
@@ -125,6 +126,18 @@ final class PDFReaderController: UIViewController {
         pdfView.addInteraction(editMenu)
 
         eraserReturn = EraserAutoReturn(toolPicker: toolPicker)
+        // With the pen on, the Pencil's palette, double-tap and squeeze come
+        // back when the study pal's chat took the focus.
+        pencilFocus = PencilFocusKeeper(
+            on: pdfView,
+            toolPicker: toolPicker,
+            isHandledByPalette: { [weak self] in
+                guard let self, self.tool == .ink else { return true }
+                return self.isFirstResponder && self.toolPicker.isVisible
+            },
+            reclaim: { [weak self] in self?.reclaimFocus() ?? false },
+            showToolbars: {}
+        )
         undoTaps = UndoTapGestures(
             on: pdfView,
             toastHost: view,
@@ -270,9 +283,21 @@ final class PDFReaderController: UIViewController {
 
     private func restoreFocusSoon() {
         Task { [weak self] in
-            guard let self, self.tool == .ink, self.view.window != nil, self.textBoxes.editingBox == nil else { return }
-            self.becomeFirstResponder()
+            guard let self, self.textBoxes.editingBox == nil else { return }
+            self.reclaimFocus()
         }
+    }
+
+    /// With the pen on, takes the keyboard focus back (and the pen palette
+    /// with it), unless a text box is being typed in or a sheet is up.
+    /// Returns whether the reader has the focus now.
+    @discardableResult
+    private func reclaimFocus() -> Bool {
+        guard tool == .ink, view.window != nil, presentedViewController == nil,
+              textBoxes.editingBox == nil else { return false }
+        if !isFirstResponder { becomeFirstResponder() }
+        toolPicker.setVisible(true, forFirstResponder: self)
+        return isFirstResponder
     }
 
     // MARK: Reading position
@@ -601,6 +626,10 @@ extension PDFReaderController: PKCanvasViewDelegate {
         guard let overlay = canvasView.superview as? PageOverlayView else { return }
         dirtyInkPages.insert(overlay.pageIndex)
         scheduleSave()
+    }
+
+    func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
+        pencilFocus?.pencilTouchedPage()
     }
 
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
@@ -938,6 +967,28 @@ extension PDFReaderController: PalPage {
         guard !strokes.isEmpty else { return "Couldn't draw that mark." }
         PalInkEditing.add(strokes, to: overlay.canvasView, actionName: "Mark")
         return nil
+    }
+
+    func palDraw(_ strokes: [String], at origin: CGPoint?, size: CGSize, color: UIColor?, penWidth: CGFloat?, in place: PalPlace) -> (result: String, isError: Bool) {
+        let index = pageIndex(place.pageIndex)
+        guard let overlay = overlays[index] else {
+            return ("Page \(index + 1) isn't on screen. Ask them to go to it, or draw on the page they're on.", true)
+        }
+        let style = PalInkReading.style(of: overlay.canvasView.drawing, fallbackHeight: 10)
+        let area = CGSize(width: size.width + 6, height: size.height + 6)
+        let spot = origin.map { clamped($0, size: area, on: index) } ?? freeSpot(for: area, on: index, near: place.near)
+        let sketch = PalInk.sketch(
+            strokes,
+            in: CGRect(origin: spot, size: size),
+            color: color ?? style.color,
+            penWidth: penWidth ?? max(style.penWidth, 1.6),
+            seed: UInt64.random(in: 1...UInt64.max)
+        )
+        guard !sketch.strokes.isEmpty else {
+            return ("There was nothing to draw. Give each stroke as pen commands (M 10 10 L 50 50) or as x y numbers.", true)
+        }
+        PalInkEditing.add(sketch.strokes, to: overlay.canvasView, actionName: "Drawing")
+        return ("On page \(index + 1): " + sketch.summary, false)
     }
 
     func palReadPages(_ pages: ClosedRange<Int>) -> String? {

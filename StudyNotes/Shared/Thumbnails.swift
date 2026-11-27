@@ -66,8 +66,29 @@ enum Thumbnails {
         // Saving a page draws its thumbnail just before it stamps the edit,
         // hence the leeway.
         guard let drawnAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-              drawnAt >= editedAt.addingTimeInterval(-2) else { return nil }
+              drawnAt >= editedAt.addingTimeInterval(-2),
+              drawnAt >= layoutChangedAt else { return nil }
         return try? Data(contentsOf: url)
+    }
+
+    private static let drawnLayoutKey = "thumbnails.notebookLayout"
+    private static let layoutChangedAtKey = "thumbnails.notebookLayoutChangedAt"
+
+    /// When notebooks last switched between the infinite canvas and Pages
+    /// (in Settings here, or from iCloud), so thumbnails drawn the other way
+    /// before then get drawn again.
+    private static var layoutChangedAt: Date {
+        let defaults = UserDefaults.standard
+        let layout = NotebookLayout.current.rawValue
+        let drawn = defaults.string(forKey: drawnLayoutKey)
+        if drawn != layout {
+            defaults.set(layout, forKey: drawnLayoutKey)
+            // Thumbnails from before there was a choice are infinite canvas ones.
+            if drawn != nil || layout != NotebookLayout.infinite.rawValue {
+                defaults.set(Date.now, forKey: layoutChangedAtKey)
+            }
+        }
+        return defaults.object(forKey: layoutChangedAtKey) as? Date ?? .distantPast
     }
 
     /// Draws a notebook page's thumbnail from what's saved, caches it and
@@ -112,6 +133,9 @@ enum Thumbnails {
         textBoxes: [(frame: CGRect, text: NSAttributedString)],
         images: [(frame: CGRect, image: UIImage)]
     ) -> UIImage {
+        if NotebookLayout.current == .pages {
+            return renderFirstSheet(drawing: drawing, textBoxes: textBoxes, images: images)
+        }
         var content = drawing.strokes.isEmpty ? CGRect.null : drawing.bounds
         for box in textBoxes {
             content = content.union(box.frame)
@@ -172,6 +196,63 @@ enum Thumbnails {
             }
             inkImage?.draw(in: frame)
             for box in textBoxes {
+                box.text.draw(with: box.frame.insetBy(dx: 6, dy: 8), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            }
+        }
+    }
+
+    /// Pages mode: the page's first sheet of paper, whole, on the desk, with
+    /// what's on it.
+    @MainActor
+    private static func renderFirstSheet(
+        drawing: PKDrawing,
+        textBoxes: [(frame: CGRect, text: NSAttributedString)],
+        images: [(frame: CGRect, image: UIImage)]
+    ) -> UIImage {
+        let size = notebookSize
+        let sheet = NotebookSheets.rect(at: 0)
+        let scale = (size.height - 2 * 14) / sheet.height
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        format.opaque = true
+        var inkImage: UIImage?
+        if drawing.strokes.contains(where: { $0.renderBounds.intersects(sheet) }) {
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                inkImage = drawing.image(from: sheet, scale: scale * 2)
+            }
+        }
+
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            NotebookSheets.deskColor.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let cg = context.cgContext
+            let onThumbnail = CGRect(
+                x: (size.width - sheet.width * scale) / 2,
+                y: (size.height - sheet.height * scale) / 2,
+                width: sheet.width * scale,
+                height: sheet.height * scale
+            )
+            // The paper, with a soft shadow, as on the page.
+            cg.saveGState()
+            cg.setShadow(offset: CGSize(width: 0, height: 1), blur: 4, color: UIColor.black.withAlphaComponent(0.2).cgColor)
+            Paper.color.setFill()
+            cg.fill(onThumbnail)
+            cg.restoreGState()
+
+            cg.clip(to: onThumbnail)
+            cg.translateBy(x: onThumbnail.minX, y: onThumbnail.minY)
+            cg.scaleBy(x: scale, y: scale)
+            cg.translateBy(x: -sheet.minX, y: -sheet.minY)
+            let cell = DotGrid.cellSize(forZoom: scale, minimum: 20) / scale
+            let radius = max(DotGrid.radius * scale, 1.2) / scale
+            DotGrid.fill(in: cg, rect: sheet, origin: .zero, cell: cell, radius: radius)
+
+            // Same order as the page: images, then ink, then text.
+            for image in images where image.frame.intersects(sheet) {
+                image.image.draw(in: image.frame)
+            }
+            inkImage?.draw(in: sheet)
+            for box in textBoxes where box.frame.intersects(sheet) {
                 box.text.draw(with: box.frame.insetBy(dx: 6, dy: 8), options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
             }
         }

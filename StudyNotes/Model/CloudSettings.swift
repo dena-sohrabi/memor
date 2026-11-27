@@ -20,6 +20,7 @@ enum CloudSettings {
         StudyPalVoice.isEnabledKey,
         PalWakeListener.isEnabledKey,
         PalMemoryStore.isOnKey,
+        NotebookLayout.settingKey,
     ]
 
     private static var isStarted = false

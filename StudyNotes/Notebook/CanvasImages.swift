@@ -250,6 +250,9 @@ final class CanvasImageCoordinator: NSObject {
         var contentChanged: @MainActor () -> Void
         /// Text dropped on the page, at a point in canvas points.
         var dropText: @MainActor (String, CGPoint) -> Void
+        /// Where an image put or dragged at a frame ends up instead: on a
+        /// paper sheet in Pages mode. Nil leaves images where they're put.
+        var keepOnPaper: (@MainActor (CGRect) -> CGRect)? = nil
     }
 
     private enum DragMode {
@@ -418,8 +421,16 @@ final class CanvasImageCoordinator: NSObject {
         case .ended:
             guard let drag, let view = views[drag.id] else { return }
             self.drag = nil
-            if view.frame != drag.startFrame {
-                setFrame(view.frame, of: drag.id, previous: drag.startFrame)
+            // Dragged off the paper: it slides back onto the sheet.
+            let frame = hooks.keepOnPaper?(view.frame) ?? view.frame
+            let slides = frame != view.frame
+            if slides {
+                UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut]) { view.frame = frame }
+            }
+            if frame != drag.startFrame {
+                setFrame(frame, of: drag.id, previous: drag.startFrame)
+            } else if slides {
+                updateOverlay()
             }
         case .cancelled, .failed:
             if let drag, let view = views[drag.id] {
@@ -493,6 +504,7 @@ final class CanvasImageCoordinator: NSObject {
     /// selected, with undo.
     @discardableResult
     func add(_ prepared: PreparedImage, frame: CGRect) -> UUID {
+        let frame = hooks.keepOnPaper?(frame) ?? frame
         let image = CanvasImage(frame: frame, imageData: prepared.data)
         image.zIndex = ((page.images ?? []).filter { !$0.isDeleted }.map(\.zIndex).max() ?? -1) + 1
         modelContext.insert(image)
