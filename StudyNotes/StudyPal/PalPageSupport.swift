@@ -299,6 +299,15 @@ enum PalInkReading {
         )
     }
 
+    /// How thick her pen is for writing `letterHeight` tall: as thick as
+    /// theirs, for its size, but never so thin it's hard to read (a fine
+    /// pen would make hers spidery). Bold is about half as thick again.
+    static func penWidth(_ style: Style, letterHeight: CGFloat, bold: Bool) -> CGFloat {
+        let matched = max(style.penWidth * letterHeight / max(style.letterHeight, 1), letterHeight * 0.085)
+        guard bold else { return matched }
+        return min(max(matched * 1.6, letterHeight * 0.14), letterHeight * 0.22)
+    }
+
     private static func colorKey(_ color: UIColor) -> String {
         var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
         color.getRed(&red, green: &green, blue: &blue, alpha: &alpha)

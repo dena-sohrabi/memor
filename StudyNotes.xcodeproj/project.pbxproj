@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1B2C3D40000000000000101 /* GLTFKit2 in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000103 /* GLTFKit2 */; };
+		A1B2C3D40000000000000104 /* SwiftMath in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D40000000000000106 /* SwiftMath */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1B2C3D40000000000000101 /* GLTFKit2 in Frameworks */,
+				A1B2C3D40000000000000104 /* SwiftMath in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -83,6 +85,7 @@
 			name = StudyNotes;
 			packageProductDependencies = (
 				A1B2C3D40000000000000103 /* GLTFKit2 */,
+				A1B2C3D40000000000000106 /* SwiftMath */,
 			);
 			productName = StudyNotes;
 			productReference = A1B2C3D400000000000000A1 /* StudyNotes.app */;
@@ -114,6 +117,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A1B2C3D40000000000000102 /* XCRemoteSwiftPackageReference "GLTFKit2" */,
+				A1B2C3D40000000000000105 /* XCRemoteSwiftPackageReference "SwiftMath" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1B2C3D400000000000000D2 /* Products */;
@@ -375,6 +379,14 @@
 				version = 0.5.15;
 			};
 		};
+		A1B2C3D40000000000000105 /* XCRemoteSwiftPackageReference "SwiftMath" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/mgriebling/SwiftMath";
+			requirement = {
+				kind = exactVersion;
+				version = 1.7.3;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -382,6 +394,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1B2C3D40000000000000102 /* XCRemoteSwiftPackageReference "GLTFKit2" */;
 			productName = GLTFKit2;
+		};
+		A1B2C3D40000000000000106 /* SwiftMath */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D40000000000000105 /* XCRemoteSwiftPackageReference "SwiftMath" */;
+			productName = SwiftMath;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

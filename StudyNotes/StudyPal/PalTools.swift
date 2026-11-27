@@ -112,6 +112,7 @@ enum PalTools {
                      "Write on the page by hand, as ink in a handwriting style: a word, a definition, a short answer, a label. Keep it short (a few words to a few lines). Use it to add to handwritten notes. Leave x and y null to write beside what they circled, or in free space in view.",
                      ["page": page, "pdf_page": pdfPage, "text": text("What to write. Use \\n for a new line."), "x": x, "y": y,
                       "letter_height": ["type": ["number", "null"], "description": "Height of a capital letter, in page points. Null to match their handwriting."],
+                      "bold": ["type": "boolean", "description": "Thicker, bolder ink that's easier to read. Use it when they find your writing thin or hard to read (and remember that they like it bold), or for a heading."],
                       "color": color]),
             function("add_note",
                      "Add a typed note to the page, in the page's own text style. For longer text, or where their notes are typed. Plain text with simple line breaks.",
@@ -181,16 +182,31 @@ enum PalTools {
             function("recall",
                      "Look up earlier talks and what you remember about their notebooks and PDFs.",
                      ["query": text("What to look for, in a few words.")]),
+            function("clip_from_pdf",
+                     "Copy an area of a PDF page onto a notebook page as an exact picture: an exam question, a diagram, a table, a formula. Use it instead of redrawing or retyping what's on a PDF; it's exact and quick. The area is in the PDF page's points from its top-left, as look_at and get_page_items on the PDF give them: look at the page first and frame the area closely. It copies the PDF itself, not their ink or notes on it. The PDF doesn't have to be open.",
+                     ["pdf": ["type": ["string", "null"], "description": "The PDF: its open page's name (P1) or its item_id. Null for the open PDF."],
+                      "pdf_page": ["type": "integer", "description": "Which page of the PDF, from 1."],
+                      "x": ["type": "number", "description": "Left edge of the area, in the PDF page's points."],
+                      "y": ["type": "number", "description": "Top edge of the area."],
+                      "width": ["type": "number", "description": "Width of the area."],
+                      "height": ["type": "number", "description": "Height of the area."],
+                      "page": ["type": ["string", "null"], "description": "The notebook page to put it on: N1 and so on. Null for the open notebook page."],
+                      "to_x": ["type": ["number", "null"], "description": "Left edge on the notebook page, in its points. Null to let Memor find a free spot beside what they circled, or in view."],
+                      "to_y": ["type": ["number", "null"], "description": "Top edge on the notebook page. Null together with to_x."],
+                      "to_width": ["type": ["number", "null"], "description": "Width on the notebook page; the height follows. Null for the same size as on the PDF."]]),
         ]
         tools += PalAppTools.definitions()
         if canDraw {
+            let pictureWidth: [String: Any] = ["type": ["number", "null"], "description": "Width on the page, in page points; the height follows the picture's shape. Null for the usual size (at most 400 points a side)."]
             tools.append(function("add_image_from_web",
-                                  "Put a picture from the web on a notebook page, beside what they circled or in view. Find a direct https link to an image file first (Wikimedia Commons is good). If it fails, try another link.",
-                                  ["page": page, "image_url": text("Direct https link to the image file."), "description": text("What it shows.")]))
+                                  "Put a picture from the web on a notebook page: at x and y, or beside what they circled or in view. Find a direct https link to an image file first (Wikimedia Commons is good). If it fails, try another link.",
+                                  ["page": page, "image_url": text("Direct https link to the image file."), "description": text("What it shows."),
+                                   "x": x, "y": y, "width": pictureWidth]))
             tools.append(function("draw_picture",
-                                  "Draw a new picture with an image model and put it on a notebook page, beside what they circled or in view. Write a detailed prompt: subject, style, colors, and any labels spelled out exactly (few and short). For diagrams that sit on their notes, ask for a clean, simple style with a transparent background. Takes up to a minute.",
+                                  "Draw a new picture with an image model and put it on a notebook page: at x and y, or beside what they circled or in view. Write a detailed prompt: subject, style, colors, and any labels spelled out exactly (few and short). For diagrams that sit on their notes, ask for a clean, simple style with a transparent background; the see-through margin is trimmed, so the picture's frame is what's drawn. Not for anything on a PDF (use clip_from_pdf). Takes up to a minute.",
                                   ["page": page, "prompt": text("What to draw, in detail."), "description": text("A short description."),
-                                   "transparent_background": ["type": "boolean"]]))
+                                   "transparent_background": ["type": "boolean"],
+                                   "x": x, "y": y, "width": pictureWidth]))
         }
         return tools
     }
@@ -221,6 +237,8 @@ enum PalTools {
         case "erase_handwriting": PalActivity(text: "Erasing…", symbol: "eraser")
         case "move_handwriting": PalActivity(text: "Tidying your page…", symbol: "arrow.up.and.down.and.arrow.left.and.right")
         case "show_area", "go_to_page", "open_item": PalActivity(text: "Showing you…", symbol: "eye")
+        case "close_item": PalActivity(text: "Closing…", symbol: "xmark.square")
+        case "clip_from_pdf": PalActivity(text: "Copying from the PDF…", symbol: "scissors")
         case "undo": PalActivity(text: "Undoing…", symbol: "arrow.uturn.backward")
         case "redo": PalActivity(text: "Redoing…", symbol: "arrow.uturn.forward")
         case "remove_highlight": PalActivity(text: "Removing a highlight…", symbol: "highlighter")
@@ -280,6 +298,8 @@ enum PalTools {
             return await addImage(input, context: context)
         case "draw_picture":
             return await drawPicture(input, context: context)
+        case "clip_from_pdf":
+            return await clipFromPDF(input, context: context)
         default:
             break
         }
@@ -339,6 +359,7 @@ enum PalTools {
                 text,
                 at: point(input["x"], input["y"]),
                 letterHeight: number(input["letter_height"]).map { CGFloat($0) },
+                bold: input["bold"] as? Bool ?? false,
                 color: PalColor.parse(string(input["color"])),
                 in: place
             )
@@ -468,13 +489,14 @@ enum PalTools {
         let place = placement(for: input, on: target, circle: context.circle)
         do {
             let data = try await ImageDownloader.fetch(url)
-            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data) }.value
+            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data, trimmingClearEdges: true) }.value
             guard let prepared else { return .text("That link isn't an image Memor can read. Try another.", isError: true) }
             // The page may have closed while it downloaded.
-            guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
+            guard let page = PalWorkspace.shared.page(id: pageID),
+                  let added = page.palAddImage(prepared, at: point(input["x"], input["y"]), width: number(input["width"]).map { CGFloat($0) }, in: place) else {
                 return .text("Couldn't add the picture. The page may have closed.", isError: true)
             }
-            let outcome = Outcome.text("Added a picture with id \(id.uuidString).", changedPage: true)
+            let outcome = Outcome.text("Added a picture with id \(added.id.uuidString) at \(describe(added.frame)).", changedPage: true)
             record("add_image_from_web", input, outcome, on: page, pageIndex: nil)
             return outcome
         } catch {
@@ -489,12 +511,13 @@ enum PalTools {
         let place = placement(for: input, on: target, circle: context.circle)
         do {
             let data = try await OpenAIClient.generateImage(prompt: prompt, transparent: input["transparent_background"] as? Bool ?? false)
-            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data) }.value
+            let prepared = await Task.detached(priority: .userInitiated) { ImageImport.prepare(data, trimmingClearEdges: true) }.value
             guard let prepared else { return .text("The picture came back in a form Memor can't read. Try again.", isError: true) }
-            guard let page = PalWorkspace.shared.page(id: pageID), let id = page.palAddImage(prepared, in: place) else {
+            guard let page = PalWorkspace.shared.page(id: pageID),
+                  let added = page.palAddImage(prepared, at: point(input["x"], input["y"]), width: number(input["width"]).map { CGFloat($0) }, in: place) else {
                 return .text("Couldn't add the picture. The page may have closed.", isError: true)
             }
-            let outcome = Outcome.text("Drew a picture and added it with id \(id.uuidString).", changedPage: true)
+            let outcome = Outcome.text("Drew a picture and added it with id \(added.id.uuidString) at \(describe(added.frame)).", changedPage: true)
             record("draw_picture", input, outcome, on: page, pageIndex: nil)
             return outcome
         } catch is CancellationError {
@@ -502,6 +525,125 @@ enum PalTools {
         } catch {
             return .text("Couldn't draw it: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    /// Copies an area of a PDF page onto a notebook page, as an exact
+    /// picture of it.
+    private static func clipFromPDF(_ input: [String: Any], context: Context) async -> Outcome {
+        guard let target = notebookPage(for: input) else {
+            return .text(input["page"] is String ? "That isn't an open notebook page. Clips go on notebook pages." : "No notebook page is open to put it on. Open one first (open_item).", isError: true)
+        }
+        guard let source = pdfSource(input["pdf"]) else {
+            return .text(input["pdf"] is String ? "No PDF has that name or item_id. The open ones are at the top of the message; list_library has the rest." : "No PDF is open. Give its item_id (from list_library).", isError: true)
+        }
+        guard let pageNumber = number(input["pdf_page"]).map({ Int($0) }), pageNumber >= 1 else {
+            return .text("`pdf_page` must be a page number from 1.", isError: true)
+        }
+        guard let x = number(input["x"]), let y = number(input["y"]),
+              let width = number(input["width"]), let height = number(input["height"]), width > 0, height > 0 else {
+            return .text("x, y, width and height must give the area on the PDF page.", isError: true)
+        }
+        let region = CGRect(x: x, y: y, width: width, height: height)
+        let pageID = target.palPageID
+        let place = placement(for: input, on: target, circle: context.circle)
+        let rendered = await Task.detached(priority: .userInitiated) {
+            renderClip(of: PDFFiles.localURL(id: source.id, fileName: source.fileName), pageIndex: pageNumber - 1, area: region)
+        }.value
+        let clip: (image: PreparedImage, area: CGRect)
+        switch rendered {
+        case .success(let made): clip = made
+        case .failure(let problem): return .text(problem.message, isError: true)
+        }
+        let placedWidth = number(input["to_width"]).map { CGFloat($0) } ?? clip.area.width
+        guard let page = PalWorkspace.shared.page(id: pageID),
+              let added = page.palAddImage(clip.image, at: point(input["to_x"], input["to_y"]), width: placedWidth, in: place) else {
+            return .text("Couldn't add the clip. The notebook page may have closed.", isError: true)
+        }
+        let what = "page \(pageNumber) of “\(source.title)”, area \(describe(clip.area))"
+        let outcome = Outcome.text("Copied \(what) onto \(PalWorkspace.shared.shortID(of: page)) as a picture with id \(added.id.uuidString) at \(describe(added.frame)).", changedPage: true)
+        record("clip_from_pdf", ["description": what, "x": added.frame.minX, "y": added.frame.minY], outcome, on: page, pageIndex: nil)
+        return outcome
+    }
+
+    /// Why a tool couldn't do something, for her.
+    private nonisolated struct Problem: Error {
+        let message: String
+    }
+
+    /// An area of a PDF page (page points from its top-left), drawn sharp
+    /// enough to read when zoomed in, at most 2048 pixels a side. Just the
+    /// PDF: no ink, notes or highlights. Blocking: call it off the main
+    /// thread. Also returns the area it shows, kept to the page.
+    private nonisolated static func renderClip(of url: URL?, pageIndex: Int, area: CGRect) -> Result<(image: PreparedImage, area: CGRect), Problem> {
+        guard let url, let document = PDFDocument(url: url) else {
+            return .failure(Problem(message: "That PDF's file isn't on this iPad yet, so it can't be copied from."))
+        }
+        guard !document.isLocked else { return .failure(Problem(message: "That PDF is locked with a password.")) }
+        guard let page = document.page(at: pageIndex) else {
+            return .failure(Problem(message: "That PDF has only \(document.pageCount) pages."))
+        }
+        let box = page.bounds(for: .cropBox)
+        let clip = area.intersection(CGRect(origin: .zero, size: box.size))
+        guard !clip.isNull, clip.width >= 4, clip.height >= 4 else {
+            return .failure(Problem(message: "That area isn't on the page: page \(pageIndex + 1) is \(Int(box.width)) × \(Int(box.height)) points."))
+        }
+        let scale = min(4, CGFloat(ImageImport.maxPixelSize) / max(clip.width, clip.height))
+        let pixelWidth = max(Int((clip.width * scale).rounded()), 1)
+        let pixelHeight = max(Int((clip.height * scale).rounded()), 1)
+        guard let context = CGContext(
+            data: nil, width: pixelWidth, height: pixelHeight, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return .failure(Problem(message: "Couldn't copy that area.")) }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+        // PDF space has y growing up, from the bottom of the page.
+        context.interpolationQuality = .high
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -clip.minX, y: -(box.height - clip.maxY))
+        page.draw(with: .cropBox, to: context)
+        // PNG, so text keeps crisp edges.
+        guard let image = context.makeImage(), let prepared = ImageImport.encode(image, hasAlpha: false, lossless: true) else {
+            return .failure(Problem(message: "Couldn't copy that area."))
+        }
+        return .success((prepared, clip))
+    }
+
+    /// A notebook page for a clip: the one named, or the open one (the one
+    /// they're using first).
+    private static func notebookPage(for input: [String: Any]) -> PalPage? {
+        if let name = string(input["page"]), !name.isEmpty {
+            return PalWorkspace.shared.page(shortID: name).flatMap { $0.canAddImages ? $0 : nil }
+        }
+        let workspace = PalWorkspace.shared
+        return (workspace.visiblePages + workspace.openPages).first { $0.canAddImages }
+    }
+
+    /// The PDF to copy from: named by its open page's name (P1) or its
+    /// item_id, or the open one.
+    private static func pdfSource(_ value: Any?) -> (id: UUID, fileName: String, title: String)? {
+        let workspace = PalWorkspace.shared
+        let wanted: UUID?
+        if let name = string(value), !name.isEmpty {
+            if let id = UUID(uuidString: name) {
+                wanted = id
+            } else if let page = workspace.page(shortID: name), page.palKind == .pdf {
+                wanted = page.palItemID
+            } else {
+                return nil
+            }
+        } else {
+            wanted = (workspace.visiblePages + workspace.openPages).first { $0.palKind == .pdf }?.palItemID
+        }
+        guard let id = wanted, let context = PalLibrary.container?.mainContext else { return nil }
+        var descriptor = FetchDescriptor<PDFItem>(predicate: #Predicate { $0.id == id })
+        descriptor.fetchLimit = 1
+        guard let pdf = (try? context.fetch(descriptor))?.first else { return nil }
+        return (pdf.id, pdf.fileName, pdf.title)
+    }
+
+    /// An area, as she reads it.
+    private static func describe(_ rect: CGRect) -> String {
+        "x \(Int(rect.minX.rounded())), y \(Int(rect.minY.rounded())), width \(Int(rect.width.rounded())), height \(Int(rect.height.rounded()))"
     }
 
     // MARK: What she did

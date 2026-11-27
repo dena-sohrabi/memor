@@ -100,10 +100,13 @@ protocol PalPage: AnyObject {
     /// Adds a typed note, at `origin` or in free space beside `place.near`
     /// (or in view), in `color` (or the page's own). Returns its id.
     func palAddText(_ text: String, at origin: CGPoint?, color: UIColor?, in place: PalPlace) -> UUID?
-    /// Adds a picture in free space beside `place.near`, or in view.
-    func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID?
-    /// Writes by hand. Returns what happened, for her.
-    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool)
+    /// Adds a picture with its top-left at `origin`, or in free space beside
+    /// `place.near` (or in view). `width` in page points, keeping its shape;
+    /// nil for the usual size. Returns its id and where it went.
+    func palAddImage(_ image: PreparedImage, at origin: CGPoint?, width: CGFloat?, in place: PalPlace) -> (id: UUID, frame: CGRect)?
+    /// Writes by hand, in bolder ink when `bold`. Returns what happened,
+    /// for her.
+    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, bold: Bool, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool)
     /// Draws a mark (a circle, underline, arrow…) on the page.
     func palMark(_ mark: PalInk.Mark, around rect: CGRect, to: CGPoint?, color: UIColor?, in place: PalPlace) -> String?
     func palMoveItem(_ id: UUID, to origin: CGPoint) -> String?

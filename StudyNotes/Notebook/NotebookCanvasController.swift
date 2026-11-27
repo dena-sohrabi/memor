@@ -919,7 +919,7 @@ extension NotebookCanvasController: PalPage {
         return textBoxes.insertBox(at: spot, width: style.width, text: text, font: style.font, color: color ?? style.color)
     }
 
-    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
+    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, bold: Bool, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
         let visible = visibleArea
         // Without handwriting to match, a size that reads well on screen.
         let style = PalInkReading.style(of: canvasView.drawing, fallbackHeight: 20 / max(canvasView.zoomScale, 0.05))
@@ -933,7 +933,7 @@ extension NotebookCanvasController: PalPage {
             letterHeight: height,
             maxWidth: maxWidth,
             color: color ?? style.color,
-            penWidth: style.penWidth * height / max(style.letterHeight, 1),
+            penWidth: PalInkReading.penWidth(style, letterHeight: height, bold: bold),
             seed: UInt64.random(in: 1...UInt64.max)
         )
         guard !writing.strokes.isEmpty else { return ("There was nothing to write.", true) }
@@ -1003,10 +1003,15 @@ extension NotebookCanvasController: PalPage {
         return 0.2126 * red + 0.7152 * green + 0.0722 * blue
     }
 
-    func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID? {
-        let size = CanvasImageCoordinator.defaultSize(of: image)
-        let origin = freeSpot(for: size, near: place.near)
-        return images.add(image, centeredAt: CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2))
+    func palAddImage(_ image: PreparedImage, at origin: CGPoint?, width: CGFloat?, in place: PalPlace) -> (id: UUID, frame: CGRect)? {
+        var size = CanvasImageCoordinator.defaultSize(of: image)
+        if let width, width.isFinite, width > 0 {
+            // Its own shape, at the width she asked for.
+            let wanted = min(max(width, 32), 4_000)
+            size = CGSize(width: wanted, height: size.height * wanted / max(size.width, 1))
+        }
+        let frame = CGRect(origin: origin ?? freeSpot(for: size, near: place.near), size: size)
+        return (images.add(image, frame: frame), frame)
     }
 
     /// Where to put something new from the study pal, as its top-left

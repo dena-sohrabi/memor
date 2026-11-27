@@ -6,6 +6,7 @@ import SwiftUI
 struct ItemWindow: View {
     let target: OpenTarget?
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -20,14 +21,18 @@ struct ItemWindow: View {
         .overlay { PalOverlay() }
         .onAppear {
             AppNavigator.shared.openWindow = openWindow
+            AppNavigator.shared.dismissWindow = dismissWindow
             if let target { AppNavigator.shared.itemWindowAppeared(target) }
         }
         .onDisappear {
             if let target { AppNavigator.shared.itemWindowDisappeared(target) }
         }
-        // The window you're using opens windows (another may have closed).
+        // The window you're using opens and closes windows (another may
+        // have closed).
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { AppNavigator.shared.openWindow = openWindow }
+            guard phase == .active else { return }
+            AppNavigator.shared.openWindow = openWindow
+            AppNavigator.shared.dismissWindow = dismissWindow
         }
     }
 }

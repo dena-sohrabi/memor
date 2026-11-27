@@ -899,9 +899,9 @@ extension PDFReaderController: PalPage {
         return textBoxes.insertBox(at: spot, width: width, text: text, pageIndex: index, color: color ?? .black)
     }
 
-    func palAddImage(_ image: PreparedImage, in place: PalPlace) -> UUID? { nil }
+    func palAddImage(_ image: PreparedImage, at origin: CGPoint?, width: CGFloat?, in place: PalPlace) -> (id: UUID, frame: CGRect)? { nil }
 
-    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
+    func palWrite(_ text: String, at origin: CGPoint?, letterHeight: CGFloat?, bold: Bool, color: UIColor?, in place: PalPlace) -> (result: String, isError: Bool) {
         let index = pageIndex(place.pageIndex)
         guard let overlay = overlays[index] else {
             return ("Page \(index + 1) isn't on screen. Ask them to go to it, or write on the page they're on.", true)
@@ -919,7 +919,7 @@ extension PDFReaderController: PalPage {
             letterHeight: height,
             maxWidth: maxWidth,
             color: color ?? style.color,
-            penWidth: style.penWidth * height / max(style.letterHeight, 1),
+            penWidth: PalInkReading.penWidth(style, letterHeight: height, bold: bold),
             seed: UInt64.random(in: 1...UInt64.max)
         )
         guard !writing.strokes.isEmpty else { return ("There was nothing to write.", true) }

@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct LibraryView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @Environment(\.scenePhase) private var scenePhase
     @Bindable private var navigator = AppNavigator.shared
@@ -106,10 +107,16 @@ struct LibraryView: View {
         }
         // The main window takes it, instead of a second one opening for it.
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
-        // The window you're using opens windows (another may have closed).
-        .onAppear { navigator.openWindow = openWindow }
+        // The window you're using opens and closes windows (another may
+        // have closed).
+        .onAppear {
+            navigator.openWindow = openWindow
+            navigator.dismissWindow = dismissWindow
+        }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { navigator.openWindow = openWindow }
+            guard phase == .active else { return }
+            navigator.openWindow = openWindow
+            navigator.dismissWindow = dismissWindow
         }
         .alert("Rename", isPresented: isRenaming, presenting: renameTarget) { item in
             TextField("Name", text: $renameText)

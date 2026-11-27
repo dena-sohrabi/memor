@@ -55,6 +55,8 @@ final class AppNavigator {
     /// Opens windows. Set by whichever window appeared last; any window's
     /// action can open any of Memor's windows.
     @ObservationIgnored var openWindow: OpenWindowAction?
+    /// Closes windows, set along with `openWindow`.
+    @ObservationIgnored var dismissWindow: DismissWindowAction?
 
     private static let key = "navigation.open"
 
@@ -88,6 +90,30 @@ final class AppNavigator {
     /// Back to the library, in the main window.
     func showLibrary() {
         path = []
+    }
+
+    /// How `close` closed something.
+    enum Closed {
+        /// Its own window closed.
+        case window
+        /// The main window went back to the library.
+        case mainWindow
+        /// It wasn't open.
+        case notOpen
+    }
+
+    /// Closes a notebook or PDF (for the study pal): its own window, if it
+    /// has one; in the main window, it goes back to the library.
+    func close(_ target: OpenTarget) -> Closed {
+        if windowTargets.contains(target), let dismissWindow {
+            dismissWindow(id: WindowID.item, value: target)
+            return .window
+        }
+        if path.contains(target) {
+            path = []
+            return .mainWindow
+        }
+        return .notOpen
     }
 
     /// Brings the main window forward (or opens it again, if it was closed).

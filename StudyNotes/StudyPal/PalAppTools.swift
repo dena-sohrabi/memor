@@ -62,6 +62,9 @@ enum PalAppTools {
                               ["item_id": item,
                                "page": ["type": ["integer", "null"], "description": "A page to show, from 1, or null."],
                                "new_window": ["type": "boolean", "description": "Open it in a window of its own. Only when they ask for a new window."]]),
+            PalTools.function("close_item",
+                              "Close a notebook or PDF: one in a window of its own closes that window; one in the main window goes back to the library. Use it when they're done with something, or ask you to close it, like a question PDF you opened beside their notes.",
+                              ["item_id": ["type": "string", "description": "The notebook's or PDF's item_id, or its open page's name (N1, P1)."]]),
             PalTools.function("go_to_page",
                               "Show another page of a notebook or PDF: the one they're using unless item_id says otherwise.",
                               ["item_id": ["type": ["string", "null"], "description": "The notebook's or PDF's item_id, or null for the one they're using."],
@@ -105,6 +108,7 @@ enum PalAppTools {
         case "list_library": return listLibrary(modelContext)
         case "list_pages": return listPages(input, modelContext)
         case "open_item": return openItem(input, modelContext)
+        case "close_item": return closeItem(input, modelContext)
         case "go_to_page": return goToPage(input, modelContext)
         case "create_notebook": return createNotebook(input, modelContext)
         case "rename_item": return renameItem(input, modelContext)
@@ -118,7 +122,7 @@ enum PalAppTools {
         }
     }
 
-    private static let names: Set<String> = ["list_library", "list_pages", "open_item", "go_to_page", "create_notebook", "rename_item", "delete_from_library", "add_page", "rename_page", "move_page", "delete_page", "set_my_name"]
+    private static let names: Set<String> = ["list_library", "list_pages", "open_item", "close_item", "go_to_page", "create_notebook", "rename_item", "delete_from_library", "add_page", "rename_page", "move_page", "delete_page", "set_my_name"]
 
     // MARK: Library
 
@@ -168,6 +172,35 @@ enum PalAppTools {
             return .text("Opened “\(pdf.title)”\(how)\(page.map { " at page \($0)" } ?? "").")
         }
         return unknownItem
+    }
+
+    private static func closeItem(_ input: [String: Any], _ context: ModelContext) -> PalTools.Outcome {
+        guard let value = string(input["item_id"]), !value.isEmpty else {
+            return .text("`item_id` must be an item_id, or an open page's name like P1.", isError: true)
+        }
+        let target: OpenTarget
+        let title: String
+        if let id = UUID(uuidString: value) {
+            if let notebook = fetchNotebook(id, context) {
+                target = .notebook(id)
+                title = notebook.title
+            } else if let pdf = fetchPDF(id, context) {
+                target = .pdf(id)
+                title = pdf.title
+            } else {
+                return unknownItem
+            }
+        } else if let page = PalWorkspace.shared.page(shortID: value) {
+            target = page.palKind == .notebook ? .notebook(page.palItemID) : .pdf(page.palItemID)
+            title = page.palItemTitle
+        } else {
+            return .text("No open page is called \(value). The open ones are at the top of the message.", isError: true)
+        }
+        switch AppNavigator.shared.close(target) {
+        case .window: return .text("Closed the window with “\(title)”.")
+        case .mainWindow: return .text("Closed “\(title)”; the main window shows the library.")
+        case .notOpen: return .text("“\(title)” isn't open.", isError: true)
+        }
     }
 
     private static func goToPage(_ input: [String: Any], _ context: ModelContext) -> PalTools.Outcome {

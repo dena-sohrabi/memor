@@ -15,27 +15,83 @@ struct PreparedImage: Sendable {
 enum ImageImport {
     static let maxPixelSize = 2048
 
-    /// Blocking: call it off the main thread.
-    static func prepare(_ data: Data) -> PreparedImage? {
+    /// Blocking: call it off the main thread. `trimmingClearEdges`: cut off
+    /// the see-through margin around what's drawn (for the study pal's
+    /// pictures), so the picture's frame is the drawing's.
+    static func prepare(_ data: Data, trimmingClearEdges: Bool = false) -> PreparedImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
         ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        guard var image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
 
         let hasAlpha = switch image.alphaInfo {
         case .first, .last, .premultipliedFirst, .premultipliedLast: true
         default: false
         }
-        let type = hasAlpha ? UTType.png : UTType.jpeg
+        if hasAlpha, trimmingClearEdges, let drawn = drawnArea(of: image) {
+            image = drawn
+        }
+        return encode(image, hasAlpha: hasAlpha)
+    }
+
+    /// PNG for pictures with see-through parts (and when asked, for sharp
+    /// text), JPEG for the rest.
+    static func encode(_ image: CGImage, hasAlpha: Bool, lossless: Bool = false) -> PreparedImage? {
+        let usePNG = hasAlpha || lossless
+        let type = usePNG ? UTType.png : UTType.jpeg
         let output = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(output as CFMutableData, type.identifier as CFString, 1, nil) else { return nil }
-        let properties: [CFString: Any] = hasAlpha ? [:] : [kCGImageDestinationLossyCompressionQuality: 0.85]
+        let properties: [CFString: Any] = usePNG ? [:] : [kCGImageDestinationLossyCompressionQuality: 0.85]
         CGImageDestinationAddImage(destination, image, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return PreparedImage(data: output as Data, pixelSize: CGSize(width: image.width, height: image.height))
+    }
+
+    /// The image cut down to what's drawn in it, with a small margin: the
+    /// see-through edges go. Nil when there's nothing worth cutting (or
+    /// nothing drawn at all).
+    private static func drawnArea(of image: CGImage) -> CGImage? {
+        let width = image.width, height = image.height
+        guard width > 2, height > 2,
+              let context = CGContext(
+                  data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ),
+              let pixels = context.data else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let bytes = pixels.bindMemory(to: UInt8.self, capacity: context.bytesPerRow * height)
+        let rowBytes = context.bytesPerRow
+        // Faint specks an image model leaves in the background don't count.
+        let threshold: UInt8 = 12
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        // Rows go top to bottom in memory, as in the image.
+        for y in 0..<height {
+            let row = bytes + y * rowBytes
+            var first = -1, last = -1
+            for x in 0..<width where row[x * 4 + 3] > threshold {
+                if first < 0 { first = x }
+                last = x
+            }
+            guard first >= 0 else { continue }
+            minX = min(minX, first)
+            maxX = max(maxX, last)
+            if minY == height { minY = y }
+            maxY = y
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        let margin = max(4, Int((Double(max(width, height)) * 0.015).rounded()))
+        let drawn = CGRect(
+            x: max(minX - margin, 0),
+            y: max(minY - margin, 0),
+            width: min(maxX + margin + 1, width) - max(minX - margin, 0),
+            height: min(maxY + margin + 1, height) - max(minY - margin, 0)
+        )
+        // Less than 2% smaller on both sides: not worth a new image.
+        guard drawn.width < CGFloat(width) * 0.98 || drawn.height < CGFloat(height) * 0.98 else { return nil }
+        return image.cropping(to: drawn)
     }
 }
 
@@ -417,8 +473,6 @@ final class CanvasImageCoordinator: NSObject {
         add(prepared, centeredAt: center)
     }
 
-    /// Puts a prepared image on the page, selected, with undo.
-    @discardableResult
     /// The size a new image gets on the page: its @2x point size, shrunk
     /// to fit a 400-point square.
     static func defaultSize(of prepared: PreparedImage) -> CGSize {
@@ -427,10 +481,18 @@ final class CanvasImageCoordinator: NSObject {
         return CGSize(width: natural.width * scale, height: natural.height * scale)
     }
 
+    /// Puts a prepared image on the page at its default size, centered on
+    /// `center`, selected, with undo.
+    @discardableResult
     func add(_ prepared: PreparedImage, centeredAt center: CGPoint) -> UUID {
         let size = Self.defaultSize(of: prepared)
-        let frame = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+        return add(prepared, frame: CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height))
+    }
 
+    /// Puts a prepared image on the page in `frame` (canvas points),
+    /// selected, with undo.
+    @discardableResult
+    func add(_ prepared: PreparedImage, frame: CGRect) -> UUID {
         let image = CanvasImage(frame: frame, imageData: prepared.data)
         image.zIndex = ((page.images ?? []).filter { !$0.isDeleted }.map(\.zIndex).max() ?? -1) + 1
         modelContext.insert(image)
