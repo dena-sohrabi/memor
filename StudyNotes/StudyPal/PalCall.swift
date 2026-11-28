@@ -76,6 +76,14 @@ final class PalCall {
     @ObservationIgnored private var heardUpTo: Int?
     /// When the last of what you said arrived.
     @ObservationIgnored private var lastHeardAt: ContinuousClock.Instant?
+    /// When the last piece of sound with her voice in it arrived.
+    @ObservationIgnored private var lastAudibleAt: ContinuousClock.Instant?
+    // For the log, every couple of seconds: how loud you were, and how many
+    // pieces of her sound came, and how many had her voice in them.
+    @ObservationIgnored private var micPeak: Float = 0
+    @ObservationIgnored private var framesIn = 0
+    @ObservationIgnored private var framesAudible = 0
+    @ObservationIgnored private var lastSoundLog = ContinuousClock.now
     @ObservationIgnored private var lastActivity = ContinuousClock.now
     @ObservationIgnored private var connectedAt = ContinuousClock.now
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -104,6 +112,10 @@ final class PalCall {
         heard = ""
         heardUpTo = nil
         lastHeardAt = nil
+        lastAudibleAt = nil
+        micPeak = 0
+        framesIn = 0
+        framesAudible = 0
         batch = Data()
         early = []
         earlyBytes = 0
@@ -144,6 +156,7 @@ final class PalCall {
                 case .audio(let data):
                     hear(data)
                 case .level(let level):
+                    micPeak = max(micPeak, level)
                     if abs(level - self.level) > 0.03 { self.level = level }
                 }
             }
@@ -248,9 +261,12 @@ final class PalCall {
             while !Task.isCancelled, self.generation == generation {
                 try? await Task.sleep(for: .milliseconds(200))
                 guard self.generation == generation else { return }
-                let playing = audio?.isPlaying ?? false
-                if isTalking != playing { isTalking = playing }
-                if playing { lastActivity = .now }
+                // GPT-Live sends sound all through the call, ten pieces a
+                // second, silent ones too: she's talking only while pieces
+                // with her voice in them are coming.
+                let talking = lastAudibleAt.map { ContinuousClock.now - $0 < .milliseconds(400) } ?? false
+                if isTalking != talking { isTalking = talking }
+                logSound()
                 switch state {
                 case .connecting where ContinuousClock.now - connectedAt >= Self.connectLimit:
                     finish(problem: "The call didn't start: your Live server didn't answer in time. Tap me to try again.")
@@ -265,6 +281,19 @@ final class PalCall {
                 }
             }
         }
+    }
+
+    /// Logs how the call's sound is doing, every couple of seconds: numbers
+    /// only, never what was said.
+    private func logSound() {
+        guard ContinuousClock.now - lastSoundLog >= .seconds(2) else { return }
+        lastSoundLog = .now
+        let mic = String(format: "%.2f", micPeak)
+        let engine = audio?.status ?? "no audio"
+        Self.log.notice("Live call sound: mic peak \(mic, privacy: .public), her pieces \(self.framesIn, privacy: .public) (\(self.framesAudible, privacy: .public) with voice), \(engine, privacy: .public)")
+        micPeak = 0
+        framesIn = 0
+        framesAudible = 0
     }
 
     /// Hangs up when Memor goes to the background (it can't keep a call
@@ -331,9 +360,17 @@ final class PalCall {
             flush()
         case "session.output_audio.delta":
             guard state == .live, let delta = event["delta"] as? String, let data = Data(base64Encoded: delta) else { return }
+            // Every piece is played, silent ones too, so her voice keeps
+            // its timing; only pieces with her voice in them count as
+            // talking (and keep the call from hanging up).
             audio?.play(data)
-            isTalking = true
-            lastActivity = .now
+            framesIn += 1
+            if Self.loudness(of: data) > Self.audibleLoudness {
+                framesAudible += 1
+                lastAudibleAt = .now
+                lastActivity = .now
+                isTalking = true
+            }
         case "session.input_transcript.delta":
             if let delta = event["delta"] as? String, !delta.isEmpty {
                 // Appended exactly as received: the pieces carry their own spaces.
@@ -343,9 +380,10 @@ final class PalCall {
                 lastHeardAt = .now
                 // You're talking over her: GPT-Live stops, and so does what
                 // was already on its way to the speaker.
-                if !delta.trimmingCharacters(in: .whitespaces).isEmpty, audio?.isPlaying == true {
+                if !delta.trimmingCharacters(in: .whitespaces).isEmpty, isTalking {
                     audio?.clear()
                     isTalking = false
+                    lastAudibleAt = nil
                 }
             }
             if let end = (event["end_ms"] as? NSNumber)?.intValue {
@@ -544,6 +582,24 @@ final class PalCall {
         return pieces
     }
 
+    /// A piece of her sound louder than this (RMS, in 16-bit sample units)
+    /// has her voice in it; GPT-Live's quiet pieces are all zeros.
+    private static let audibleLoudness: Double = 150
+
+    /// How loud a piece of 16-bit PCM is (RMS).
+    private static func loudness(of data: Data) -> Double {
+        let count = data.count / 2
+        guard count > 0 else { return 0 }
+        var sum = 0.0
+        data.withUnsafeBytes { raw in
+            for i in 0..<count {
+                let sample = Double(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: i * 2, as: Int16.self)))
+                sum += sample * sample
+            }
+        }
+        return (sum / Double(count)).squareRoot()
+    }
+
     private static func seconds(in event: [String: Any]) -> Double? {
         ((event["usage"] as? [String: Any])?["seconds"] as? NSNumber)?.doubleValue
     }
@@ -573,14 +629,24 @@ final class PalCallAudio: @unchecked Sendable {
     private var events: AsyncStream<SpeechEvent>.Continuation?
     private var isTapped = false
     private var isPlayerAttached = false
+    private var configurationObserver: NSObjectProtocol?
 
     /// 16-bit mono at 24 kHz comes in; the player takes floats.
     private static let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 24_000, channels: 1, interleaved: false)!
+    private static let log = Logger(subsystem: "com.denasohrabi.memor", category: "voice")
 
     private enum Failure: Error { case noMicrophone }
 
     /// Her voice is still playing.
     var isPlaying: Bool { !pending.isEmpty }
+
+    /// For the log: whether the engine runs, where the sound goes, and how
+    /// loud the iPad is set.
+    var status: String {
+        let session = AVAudioSession.sharedInstance()
+        let route = session.currentRoute.outputs.map(\.portType.rawValue).joined(separator: "+")
+        return "engine \(engine.isRunning ? "running" : "STOPPED"), player \(player.isPlaying ? "playing" : "idle"), out \(route), volume \(String(format: "%.2f", session.outputVolume))"
+    }
 
     /// Starts the microphone, sending how loud it is and the sound itself
     /// (16-bit mono PCM at 24 kHz) to `events`, and gets her voice ready.
@@ -609,6 +675,29 @@ final class PalCallAudio: @unchecked Sendable {
         engine.prepare()
         try engine.start()
         player.play()
+
+        // If iPadOS reconfigures the audio mid-call (a route change, say),
+        // the engine stops: start it again.
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Self.log.notice("Live call audio: configuration changed, engine \(self.engine.isRunning ? "running" : "stopped", privacy: .public)")
+            if !self.engine.isRunning {
+                try? self.engine.start()
+                self.player.play()
+            }
+        }
+
+        let output = engine.outputNode.outputFormat(forBus: 0)
+        let mixer = engine.mainMixerNode.outputFormat(forBus: 0)
+        Self.log.notice("""
+            Live call audio started: mic \(format.sampleRate, privacy: .public) Hz × \(format.channelCount, privacy: .public), \
+            mixer \(mixer.sampleRate, privacy: .public) Hz × \(mixer.channelCount, privacy: .public), \
+            output \(output.sampleRate, privacy: .public) Hz × \(output.channelCount, privacy: .public), \
+            voice processing in \(input.isVoiceProcessingEnabled, privacy: .public) out \(self.engine.outputNode.isVoiceProcessingEnabled, privacy: .public), \
+            \(self.status, privacy: .public)
+            """)
     }
 
     /// Plays a piece of her voice (16-bit mono PCM at 24 kHz).
@@ -643,6 +732,10 @@ final class PalCallAudio: @unchecked Sendable {
 
     /// Stops the microphone and her voice, and lets the audio session go.
     func stop() {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
         if isTapped {
             engine.inputNode.removeTap(onBus: 0)
             isTapped = false
